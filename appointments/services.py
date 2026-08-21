@@ -359,6 +359,7 @@ def queue_info(appointment: Appointment) -> dict:
         "upcoming_count": total_upcoming,
         "phase": phase,
         "estimated_at": estimated.isoformat(),
+        "scheduled_at": appointment.scheduled_at.isoformat(),
         "approx_time": approx,
         "date_label": date_label,
         "doctor_name": doctor.full_name,

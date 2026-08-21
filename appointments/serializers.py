@@ -220,3 +220,115 @@ class DoctorAppointmentStatusSerializer(serializers.ModelSerializer):
                 "Doctors can only set status to completed or rejected."
             )
         return value
+
+
+class DoctorBookSerializer(serializers.Serializer):
+    patient_uuid = serializers.UUIDField(required=False)
+    phone = serializers.CharField(required=False, max_length=20)
+    name = serializers.CharField(required=False, allow_blank=True, max_length=150)
+    clinic_id = serializers.IntegerField()
+    token_date = serializers.DateField()
+    slot_time = serializers.TimeField()
+    notes = serializers.CharField(required=False, allow_blank=True, max_length=2000)
+
+    def validate_phone(self, value):
+        from patients.serializers import normalize_phone
+
+        phone = normalize_phone(value)
+        if len(phone) < 10:
+            raise serializers.ValidationError("Enter a valid phone number.")
+        return phone
+
+    def validate(self, attrs):
+        from appointments.services import (
+            generate_slots_for_windows,
+            pakistan_now,
+            pakistan_today,
+            upcoming_available_dates,
+        )
+        from catalog.models import Clinic, DoctorClinic
+        from patients.serializers import clean_name
+
+        doctor = self.context.get("doctor")
+        if doctor is None or not doctor.is_active:
+            raise serializers.ValidationError("Doctor not found or inactive.")
+
+        patient_uuid = attrs.get("patient_uuid")
+        phone = attrs.get("phone")
+        if not patient_uuid and not phone:
+            raise serializers.ValidationError(
+                "Provide patient_uuid or phone to identify the patient."
+            )
+        if patient_uuid and phone:
+            raise serializers.ValidationError(
+                "Provide either patient_uuid or phone, not both."
+            )
+
+        if patient_uuid:
+            patient = PatientProfile.objects.filter(uuid=patient_uuid).first()
+            if not patient:
+                raise serializers.ValidationError(
+                    {"patient_uuid": "Patient not found."}
+                )
+            attrs["patient"] = patient
+            attrs["create_patient"] = False
+        else:
+            patient = PatientProfile.objects.filter(phone=phone).first()
+            if patient:
+                attrs["patient"] = patient
+                attrs["create_patient"] = False
+            else:
+                name_in = clean_name(attrs.get("name") or "")
+                if not name_in:
+                    raise serializers.ValidationError(
+                        {"name": "Full name is required for new patients."}
+                    )
+                attrs["patient"] = None
+                attrs["create_patient"] = True
+                attrs["new_patient_name"] = name_in
+                attrs["new_patient_phone"] = phone
+
+        clinic = Clinic.objects.filter(pk=attrs["clinic_id"], is_active=True).first()
+        if not clinic:
+            raise serializers.ValidationError({"clinic_id": "Clinic not found."})
+        if not DoctorClinic.objects.filter(doctor=doctor, clinic=clinic).exists():
+            raise serializers.ValidationError(
+                {"clinic_id": "You are not linked to this clinic."}
+            )
+
+        token_date = attrs["token_date"]
+        options = upcoming_available_dates(doctor, clinic=clinic)
+        allowed = {o["date"] for o in options}
+        if token_date.isoformat() not in allowed:
+            raise serializers.ValidationError(
+                {"token_date": "Selected date is not available at this clinic."}
+            )
+        match = next(o for o in options if o["date"] == token_date.isoformat())
+        attrs["start"] = match["start"]
+        attrs["clinic"] = clinic
+        attrs["windows"] = match.get("windows") or [
+            {"start": match["start"], "end": match["end"]}
+        ]
+
+        slot_time = attrs["slot_time"]
+        valid = generate_slots_for_windows(attrs["windows"], doctor.session_time)
+        if slot_time not in valid:
+            raise serializers.ValidationError(
+                {"slot_time": "Selected time is not available for this clinic."}
+            )
+
+        booked = set(match.get("booked_times") or [])
+        slot_key = slot_time.strftime("%H:%M:%S")
+        if slot_key in booked:
+            raise serializers.ValidationError(
+                {"slot_time": "This time slot is already booked."}
+            )
+
+        if token_date == pakistan_today():
+            now = pakistan_now().time()
+            if slot_time <= now:
+                raise serializers.ValidationError(
+                    {"slot_time": "Selected time has already passed."}
+                )
+
+        return attrs

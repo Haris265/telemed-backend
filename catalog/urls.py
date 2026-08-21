@@ -16,6 +16,7 @@ from .doctor_views import (
     DoctorAppointmentStartVisitView,
     DoctorClinicAvailabilityListCreateView,
     DoctorClinicAvailabilityReplaceView,
+    DoctorClinicAvailableDatesView,
     DoctorClinicDetailView,
     DoctorClinicListCreateView,
     DoctorClinicalNoteView,
@@ -23,6 +24,7 @@ from .doctor_views import (
     DoctorMeView,
     DoctorPatientDetailView,
     DoctorPatientListView,
+    DoctorPatientLookupView,
     DoctorPrescriptionView,
 )
 from .views import (
@@ -108,6 +110,11 @@ doctor_urlpatterns = [
         DoctorClinicAvailabilityReplaceView.as_view(),
         name="doctor-clinic-availability-replace",
     ),
+    path(
+        "clinics/<int:pk>/available-dates/",
+        DoctorClinicAvailableDatesView.as_view(),
+        name="doctor-clinic-available-dates",
+    ),
     path("availability/", DoctorAvailabilityListCreateView.as_view(), name="doctor-availability"),
     path(
         "availability/<int:pk>/",
@@ -151,6 +158,11 @@ doctor_urlpatterns = [
         name="doctor-appointment-prescription",
     ),
     path("patients/", DoctorPatientListView.as_view(), name="doctor-patients"),
+    path(
+        "patients/lookup/",
+        DoctorPatientLookupView.as_view(),
+        name="doctor-patients-lookup",
+    ),
     path(
         "patients/<uuid:uuid>/",
         DoctorPatientDetailView.as_view(),

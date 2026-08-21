@@ -1,3 +1,5 @@
+from datetime import time
+
 from django.db.models import Count, Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -13,10 +15,13 @@ from appointments.serializers import (
     AppointmentSerializer,
     ClinicalNoteSerializer,
     DoctorAppointmentStatusSerializer,
+    DoctorBookSerializer,
     PrescriptionSerializer,
     VisitAttachmentSerializer,
 )
+from appointments.services import book_token, upcoming_available_dates
 from patients.models import PatientProfile
+from patients.serializers import normalize_phone
 
 from .models import DoctorAvailability, DoctorClinic, DoctorProfile
 from .serializers import (
@@ -311,7 +316,7 @@ class DoctorAppointmentListView(generics.ListAPIView):
     def get_queryset(self):
         doctor = self.request.user.doctor_profile
         qs = Appointment.objects.filter(doctor=doctor).select_related(
-            "patient", "doctor"
+            "patient", "doctor", "clinic"
         )
         today = timezone.localdate()
 
@@ -339,6 +344,47 @@ class DoctorAppointmentListView(generics.ListAPIView):
                 qs = qs.filter(token_date__gte=today)
 
         return qs.order_by("token_date", "token_number", "scheduled_at")
+
+    def post(self, request):
+        doctor = request.user.doctor_profile
+        ser = DoctorBookSerializer(
+            data=request.data, context={"request": request, "doctor": doctor}
+        )
+        ser.is_valid(raise_exception=True)
+        data = ser.validated_data
+
+        if data.get("create_patient"):
+            patient = PatientProfile.objects.create(
+                phone=data["new_patient_phone"],
+                name=data["new_patient_name"],
+                is_verified=True,
+            )
+        else:
+            patient = data["patient"]
+
+        clinic = data["clinic"]
+        token_date = data["token_date"]
+        parts = [int(x) for x in data["start"].split(":")[:3]]
+        start_time = time(*parts)
+        notes = (data.get("notes") or "").strip() or "Booked by doctor"
+
+        try:
+            appt = book_token(
+                patient,
+                doctor,
+                token_date,
+                start_time,
+                slot_time=data.get("slot_time"),
+                clinic=clinic,
+                notes=notes,
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            AppointmentSerializer(appt).data,
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class DoctorAppointmentDetailView(APIView):
@@ -576,10 +622,7 @@ class DoctorPatientListView(APIView):
         today = timezone.localdate()
 
         patient_ids = (
-            Appointment.objects.filter(
-                doctor=doctor,
-                token_date__gte=today,
-            )
+            Appointment.objects.filter(doctor=doctor)
             .values_list("patient_id", flat=True)
             .distinct()
         )
@@ -629,6 +672,53 @@ class DoctorPatientListView(APIView):
 
         results.sort(key=lambda p: (p["next_appointment"] or {}).get("token_date", "9999"))
         return Response(results)
+
+
+class DoctorPatientLookupView(APIView):
+    permission_classes = [IsDoctor]
+
+    def get(self, request):
+        raw = (request.query_params.get("phone") or "").strip()
+        if not raw:
+            return Response(
+                {"detail": "phone query parameter is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        phone = normalize_phone(raw)
+        if len(phone) < 10:
+            return Response(
+                {"detail": "Enter a valid phone number."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        patient = PatientProfile.objects.filter(phone=phone).first()
+        if not patient:
+            return Response({"detail": "Patient not found."}, status=404)
+        return Response(
+            {
+                "uuid": str(patient.uuid),
+                "name": patient.name,
+                "phone": patient.phone,
+            }
+        )
+
+
+class DoctorClinicAvailableDatesView(APIView):
+    permission_classes = [IsDoctor]
+
+    def get(self, request, pk: int):
+        link = get_object_or_404(
+            DoctorClinic.objects.select_related("clinic"),
+            pk=pk,
+            doctor=request.user.doctor_profile,
+        )
+        options = upcoming_available_dates(link.doctor, clinic=link.clinic)
+        return Response(
+            {
+                "clinic_id": link.clinic_id,
+                "clinic_name": link.clinic.name,
+                "dates": options,
+            }
+        )
 
 
 class DoctorPatientDetailView(APIView):
