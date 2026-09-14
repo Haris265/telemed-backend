@@ -77,7 +77,7 @@ def _send_attachments_via_whatsapp(appointment: Appointment) -> None:
         )
         return
 
-    client = MetaWhatsAppClient()
+    client = MetaWhatsAppClient.for_doctor(appointment.doctor)
     doctor_name = appointment.doctor.full_name
     token = appointment.token_code
     client.send_text(

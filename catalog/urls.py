@@ -27,6 +27,7 @@ from .doctor_views import (
     DoctorPatientLookupView,
     DoctorPrescriptionView,
 )
+from whatsapp.urls import doctor_whatsapp_urlpatterns
 from .views import (
     AdminDeactivateUnsubscribedDoctorsView,
     AdminDoctorAvailabilityListView,
@@ -168,4 +169,5 @@ doctor_urlpatterns = [
         DoctorPatientDetailView.as_view(),
         name="doctor-patient-detail",
     ),
+    *doctor_whatsapp_urlpatterns,
 ]

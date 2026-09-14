@@ -6,7 +6,9 @@ from typing import Any
 
 from django.conf import settings
 from django.http import HttpResponse, HttpResponseForbidden
+from django.shortcuts import render
 from django.utils.decorators import method_decorator
+from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework import status
 from rest_framework.permissions import AllowAny
@@ -15,12 +17,13 @@ from rest_framework.views import APIView
 
 from .fsm import handle_inbound_message
 from .meta_client import MetaWhatsAppClient
+from .models import DoctorWhatsAppAccount
 
 logger = logging.getLogger(__name__)
 
 
 def _verify_signature(request) -> bool:
-    app_secret = settings.META_WA_APP_SECRET
+    app_secret = settings.META_WA_APP_SECRET or settings.META_APP_SECRET
     if not app_secret:
         # Allow local/dev without secret configured
         return True
@@ -46,20 +49,49 @@ def _contacts_by_wa_id(value: dict[str, Any]) -> dict[str, str]:
     return out
 
 
-def _extract_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    messages = []
-    for entry in payload.get("entry", []):
-        for change in entry.get("changes", []):
-            value = change.get("value", {})
+def _extract_message_batches(
+    payload: dict[str, Any],
+) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Return list of (phone_number_id, messages) from a Meta webhook payload."""
+    batches: list[tuple[str, list[dict[str, Any]]]] = []
+    for entry in payload.get("entry", []) or []:
+        for change in entry.get("changes", []) or []:
+            value = change.get("value", {}) or {}
+            metadata = value.get("metadata") or {}
+            phone_number_id = str(metadata.get("phone_number_id") or "").strip()
             names = _contacts_by_wa_id(value)
+            messages: list[dict[str, Any]] = []
             for msg in value.get("messages", []) or []:
-                # Attach WhatsApp profile name so FSM can store PatientProfile.name
                 from_id = str(msg.get("from") or "").strip()
                 profile_name = names.get(from_id, "")
                 if profile_name:
                     msg = {**msg, "profile_name": profile_name}
                 messages.append(msg)
-    return messages
+            if messages:
+                batches.append((phone_number_id, messages))
+    return batches
+
+
+def _resolve_client_and_doctor(
+    phone_number_id: str,
+) -> tuple[MetaWhatsAppClient, DoctorWhatsAppAccount | None]:
+    phone_number_id = (phone_number_id or "").strip()
+    if phone_number_id:
+        account = (
+            DoctorWhatsAppAccount.objects.select_related("doctor")
+            .filter(
+                phone_number_id=phone_number_id,
+                status=DoctorWhatsAppAccount.Status.CONNECTED,
+            )
+            .first()
+        )
+        if account and account.is_connected:
+            client = MetaWhatsAppClient(
+                token=account.get_access_token(),
+                phone_number_id=account.phone_number_id,
+            )
+            return client, account
+    return MetaWhatsAppClient.platform(), None
 
 
 @method_decorator(csrf_exempt, name="dispatch")
@@ -88,12 +120,16 @@ class WhatsAppWebhookView(APIView):
             return HttpResponseForbidden("Invalid signature")
 
         payload = request.data if isinstance(request.data, dict) else {}
-        client = MetaWhatsAppClient()
-        for msg in _extract_messages(payload):
-            try:
-                handle_inbound_message(msg, client)
-            except Exception:
-                logger.exception("Failed handling WhatsApp message %s", msg.get("id"))
+        for phone_number_id, messages in _extract_message_batches(payload):
+            client, account = _resolve_client_and_doctor(phone_number_id)
+            bound_doctor = account.doctor if account else None
+            for msg in messages:
+                try:
+                    handle_inbound_message(msg, client, doctor=bound_doctor)
+                except Exception:
+                    logger.exception(
+                        "Failed handling WhatsApp message %s", msg.get("id")
+                    )
         return Response({"status": "ok"})
 
 
@@ -111,6 +147,7 @@ class WhatsAppSimulateView(APIView):
         phone = str(request.data.get("phone", "")).strip()
         text = str(request.data.get("text", "")).strip()
         profile_name = str(request.data.get("profile_name", "")).strip()
+        doctor_id = request.data.get("doctor_id")
         if not phone or not text:
             return Response(
                 {"detail": "phone and text are required"},
@@ -132,5 +169,43 @@ class WhatsAppSimulateView(APIView):
         }
         if profile_name:
             msg["profile_name"] = profile_name
-        handle_inbound_message(msg, CaptureClient())
+
+        bound_doctor = None
+        if doctor_id:
+            from catalog.models import DoctorProfile
+
+            bound_doctor = DoctorProfile.objects.filter(id=doctor_id, is_active=True).first()
+
+        handle_inbound_message(msg, CaptureClient(), doctor=bound_doctor)
         return Response({"replies": replies})
+
+
+class EmbeddedSignupPageView(View):
+    """Host page that runs Meta Embedded Signup and deep-links back to the app."""
+
+    def get(self, request):
+        state = (request.GET.get("state") or "").strip()
+        app_id = settings.META_APP_ID
+        config_id = settings.META_EMBEDDED_SIGNUP_CONFIG_ID
+        if not app_id or not config_id:
+            return HttpResponse(
+                "WhatsApp Embedded Signup is not configured on the server.",
+                status=503,
+                content_type="text/plain",
+            )
+        if not state:
+            return HttpResponse(
+                "Missing state parameter.",
+                status=400,
+                content_type="text/plain",
+            )
+        return render(
+            request,
+            "whatsapp/embedded_signup.html",
+            {
+                "app_id": app_id,
+                "config_id": config_id,
+                "state": state,
+                "redirect_scheme": "opd-doctor://whatsapp-callback",
+            },
+        )

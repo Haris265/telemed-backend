@@ -89,7 +89,7 @@ class RequestOtpView(APIView):
         cache.set(f"otp:{phone}", otp, timeout=300)
 
         body = (
-            f"Your Telemed login OTP is: {otp}\n"
+            f"Your PatientCare login OTP is: {otp}\n"
             "It expires in 5 minutes."
         )
         try:

@@ -161,6 +161,17 @@ SIMPLE_JWT = {
 
 META_WA_TOKEN = os.getenv("META_WA_TOKEN", "").strip()
 META_WA_PHONE_NUMBER_ID = os.getenv("META_WA_PHONE_NUMBER_ID", "").strip()
+META_WA_WABA_ID = os.getenv("META_WA_WABA_ID", "").strip()
 META_WA_VERIFY_TOKEN = os.getenv("META_WA_VERIFY_TOKEN", "telemed-verify-token").strip()
 META_WA_APP_SECRET = os.getenv("META_WA_APP_SECRET", "").strip()
 CLINIC_WHATSAPP_NUMBER = os.getenv("CLINIC_WHATSAPP_NUMBER", "").strip()
+
+# Per-doctor Embedded Signup (Meta WhatsApp Cloud API)
+META_APP_ID = os.getenv("META_APP_ID", "").strip()
+META_APP_SECRET = os.getenv("META_APP_SECRET", "").strip() or META_WA_APP_SECRET
+META_EMBEDDED_SIGNUP_CONFIG_ID = os.getenv("META_EMBEDDED_SIGNUP_CONFIG_ID", "").strip()
+META_EMBEDDED_SIGNUP_REDIRECT_URI = os.getenv(
+    "META_EMBEDDED_SIGNUP_REDIRECT_URI", ""
+).strip()
+META_TOKEN_FERNET_KEY = os.getenv("META_TOKEN_FERNET_KEY", "").strip()
+META_GRAPH_VERSION = os.getenv("META_GRAPH_VERSION", "v21.0").strip() or "v21.0"

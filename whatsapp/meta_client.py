@@ -10,12 +10,67 @@ logger = logging.getLogger(__name__)
 
 
 class MetaWhatsAppClient:
-    def __init__(self):
-        self.token = settings.META_WA_TOKEN
-        self.phone_number_id = settings.META_WA_PHONE_NUMBER_ID
-        self.graph_base = "https://graph.facebook.com/v21.0"
+    def __init__(
+        self,
+        token: str | None = None,
+        phone_number_id: str | None = None,
+    ):
+        self.token = (token if token is not None else settings.META_WA_TOKEN) or ""
+        self.phone_number_id = (
+            phone_number_id
+            if phone_number_id is not None
+            else settings.META_WA_PHONE_NUMBER_ID
+        ) or ""
+        version = getattr(settings, "META_GRAPH_VERSION", "v21.0") or "v21.0"
+        self.graph_base = f"https://graph.facebook.com/{version}"
         self.base_url = f"{self.graph_base}/{self.phone_number_id}/messages"
         self.media_url = f"{self.graph_base}/{self.phone_number_id}/media"
+
+    @classmethod
+    def platform(cls) -> "MetaWhatsAppClient":
+        return cls()
+
+    @classmethod
+    def for_doctor(cls, doctor) -> "MetaWhatsAppClient":
+        """Prefer doctor's connected WhatsApp; fall back to platform credentials."""
+        account = getattr(doctor, "whatsapp_account", None)
+        if account is None:
+            try:
+                from .models import DoctorWhatsAppAccount
+
+                account = DoctorWhatsAppAccount.objects.filter(doctor=doctor).first()
+            except Exception:
+                account = None
+        if account and account.is_connected:
+            return cls(
+                token=account.get_access_token(),
+                phone_number_id=account.phone_number_id,
+            )
+        return cls.platform()
+
+    @classmethod
+    def for_phone_number_id(cls, phone_number_id: str) -> "MetaWhatsAppClient | None":
+        phone_number_id = (phone_number_id or "").strip()
+        if not phone_number_id:
+            return None
+        from .models import DoctorWhatsAppAccount
+
+        account = (
+            DoctorWhatsAppAccount.objects.select_related("doctor")
+            .filter(
+                phone_number_id=phone_number_id,
+                status=DoctorWhatsAppAccount.Status.CONNECTED,
+            )
+            .first()
+        )
+        if not account:
+            if phone_number_id == (settings.META_WA_PHONE_NUMBER_ID or "").strip():
+                return cls.platform()
+            return None
+        return cls(
+            token=account.get_access_token(),
+            phone_number_id=account.phone_number_id,
+        )
 
     def get_display_phone_digits(self) -> str:
         """Return clinic WhatsApp digits (E.164 without +) from Meta phone number id."""

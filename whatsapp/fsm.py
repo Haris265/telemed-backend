@@ -23,7 +23,7 @@ from .models import WhatsAppSession
 logger = logging.getLogger(__name__)
 
 MENU_TEXT = (
-    "Welcome to Telemed.\n\n"
+    "Welcome to PatientCare.\n\n"
     "Reply with:\n"
     "1. Request OTP for Login\n"
     "2. Book an appointment\n"
@@ -268,19 +268,46 @@ def _format_appointments(patient: PatientProfile) -> str:
 
 
 def _reset_to_menu(session: WhatsAppSession) -> None:
+    bound = session.context.get("bound_doctor_id") if isinstance(session.context, dict) else None
     session.state = WhatsAppSession.State.MENU
-    session.context = {}
+    session.context = {"bound_doctor_id": bound} if bound else {}
     session.save(update_fields=["state", "context", "updated_at"])
 
 
+def _ctx(session: WhatsAppSession, **kwargs) -> dict:
+    """Build session context while preserving per-number bound doctor."""
+    bound = None
+    if isinstance(session.context, dict):
+        bound = session.context.get("bound_doctor_id")
+    data = dict(kwargs)
+    if bound is not None:
+        data["bound_doctor_id"] = bound
+    return data
+
+
 def _start_booking(session: WhatsAppSession, client, phone: str) -> None:
+    # Per-doctor WhatsApp number: skip specialty/doctor pickers.
+    bound_id = session.context.get("bound_doctor_id")
+    if bound_id:
+        doctor = DoctorProfile.objects.filter(id=bound_id, is_active=True).first()
+        if not doctor:
+            client.send_text(
+                phone,
+                "This doctor's WhatsApp booking is unavailable right now.\n\n" + MENU_TEXT,
+            )
+            _reset_to_menu(session)
+            return
+        client.send_text(phone, f"Booking with Dr. {doctor.full_name}.")
+        _prompt_clinic_selection(session, client, phone, doctor)
+        return
+
     specialities = _active_specialities()
     if not specialities:
         client.send_text(phone, "No specialities available right now. Please try later.")
         _reset_to_menu(session)
         return
     session.state = WhatsAppSession.State.AWAITING_SPECIALITY
-    session.context = {"speciality_ids": [s.id for s in specialities]}
+    session.context = _ctx(session, speciality_ids=[s.id for s in specialities])
     session.save(update_fields=["state", "context", "updated_at"])
     client.send_text(phone, _format_specialities(specialities))
 
@@ -300,10 +327,11 @@ def _offer_doctors(
         _reset_to_menu(session)
         return
     session.state = WhatsAppSession.State.AWAITING_DOCTOR
-    session.context = {
-        "speciality_id": speciality.id,
-        "doctor_ids": [d.id for d in doctors],
-    }
+    session.context = _ctx(
+        session,
+        speciality_id=speciality.id,
+        doctor_ids=[d.id for d in doctors],
+    )
     session.save(update_fields=["state", "context", "updated_at"])
     client.send_text(phone, f"{speciality.name}\n\n{_format_doctors(doctors)}")
 
@@ -326,10 +354,11 @@ def _prompt_clinic_selection(
         _prompt_date_selection(session, client, phone, doctor, clinics[0])
         return
     session.state = WhatsAppSession.State.AWAITING_CLINIC
-    session.context = {
-        "doctor_id": doctor.id,
-        "clinic_ids": [c.id for c in clinics],
-    }
+    session.context = _ctx(
+        session,
+        doctor_id=doctor.id,
+        clinic_ids=[c.id for c in clinics],
+    )
     session.save(update_fields=["state", "context", "updated_at"])
     client.send_text(
         phone,
@@ -353,11 +382,12 @@ def _prompt_date_selection(
         _reset_to_menu(session)
         return
     session.state = WhatsAppSession.State.AWAITING_DATE
-    session.context = {
-        "doctor_id": doctor.id,
-        "clinic_id": clinic.id,
-        "date_options": options,
-    }
+    session.context = _ctx(
+        session,
+        doctor_id=doctor.id,
+        clinic_id=clinic.id,
+        date_options=options,
+    )
     session.save(update_fields=["state", "context", "updated_at"])
     client.send_text(phone, _format_date_options(doctor, clinic, options))
 
@@ -463,7 +493,7 @@ def _resolve_doctor_choice(text: str, ordered: list[DoctorProfile]) -> DoctorPro
     return None
 
 
-def handle_inbound_message(msg: dict, client) -> None:
+def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = None) -> None:
     phone = _normalize_phone(str(msg.get("from", "")))
     if not phone:
         return
@@ -475,6 +505,13 @@ def handle_inbound_message(msg: dict, client) -> None:
     if message_id:
         session.last_message_id = message_id
         session.save(update_fields=["last_message_id", "updated_at"])
+
+    if doctor is not None:
+        ctx = dict(session.context or {})
+        if ctx.get("bound_doctor_id") != doctor.id:
+            ctx["bound_doctor_id"] = doctor.id
+            session.context = ctx
+            session.save(update_fields=["context", "updated_at"])
 
     text = _message_text(msg)
     if not text:
@@ -500,7 +537,7 @@ def handle_inbound_message(msg: dict, client) -> None:
             _reset_to_menu(session)
             client.send_text(
                 phone,
-                f"Thanks {name}! Your Telemed profile is ready.\n\n{MENU_TEXT}",
+                f"Thanks {name}! Your PatientCare profile is ready.\n\n{MENU_TEXT}",
             )
             return
 
@@ -510,7 +547,7 @@ def handle_inbound_message(msg: dict, client) -> None:
             _reset_to_menu(session)
             client.send_text(
                 phone,
-                f"Welcome {profile_name}! Your Telemed profile is ready.\n\n{MENU_TEXT}",
+                f"Welcome {profile_name}! Your PatientCare profile is ready.\n\n{MENU_TEXT}",
             )
             return
 
@@ -518,7 +555,7 @@ def handle_inbound_message(msg: dict, client) -> None:
         session.save(update_fields=["state", "updated_at"])
         client.send_text(
             phone,
-            "Welcome to Telemed! We don't have your profile yet.\n"
+            "Welcome to PatientCare! We don't have your profile yet.\n"
             "Please reply with your full name to create an account.",
         )
         return
@@ -788,11 +825,11 @@ def handle_inbound_message(msg: dict, client) -> None:
         otp = _generate_otp()
         cache.set(f"otp:{phone}", otp, timeout=300)
         session.state = WhatsAppSession.State.AWAITING_OTP
-        session.context = {}
+        session.context = _ctx(session)
         session.save(update_fields=["state", "context", "updated_at"])
         client.send_text(
             phone,
-            f"Your Telemed login OTP is: {otp}\nIt expires in 5 minutes.\nReply with the OTP to verify.",
+            f"Your PatientCare login OTP is: {otp}\nIt expires in 5 minutes.\nReply with the OTP to verify.",
         )
         return
 
