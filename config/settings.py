@@ -175,3 +175,7 @@ META_EMBEDDED_SIGNUP_REDIRECT_URI = os.getenv(
 ).strip()
 META_TOKEN_FERNET_KEY = os.getenv("META_TOKEN_FERNET_KEY", "").strip()
 META_GRAPH_VERSION = os.getenv("META_GRAPH_VERSION", "v21.0").strip() or "v21.0"
+# HTTPS callback for doctor-web Embedded Signup (falls back to mobile deep link).
+DOCTOR_WEB_WHATSAPP_REDIRECT_URI = os.getenv(
+    "DOCTOR_WEB_WHATSAPP_REDIRECT_URI", ""
+).strip()

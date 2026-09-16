@@ -173,9 +173,16 @@ class DoctorWhatsAppSessionView(APIView):
         account.save(update_fields=["status", "last_error", "updated_at"])
 
         state = _make_state(doctor.id)
+        redirect_uri = str(
+            request.data.get("redirect_uri")
+            or getattr(settings, "DOCTOR_WEB_WHATSAPP_REDIRECT_URI", "")
+            or ""
+        ).strip()
+        if not redirect_uri:
+            redirect_uri = "opd-doctor://whatsapp-callback"
         base = _signup_base_url(request)
         sep = "&" if "?" in base else "?"
-        signup_url = f"{base}{sep}{urlencode({'state': state})}"
+        signup_url = f"{base}{sep}{urlencode({'state': state, 'redirect_uri': redirect_uri})}"
 
         return Response(
             {
@@ -183,7 +190,7 @@ class DoctorWhatsAppSessionView(APIView):
                 "config_id": config_id,
                 "state": state,
                 "signup_url": signup_url,
-                "redirect_scheme": "opd-doctor://whatsapp-callback",
+                "redirect_scheme": redirect_uri,
             }
         )
 

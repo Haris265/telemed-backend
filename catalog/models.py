@@ -189,18 +189,29 @@ class DoctorAvailability(models.Model):
         related_name="availabilities",
     )
     weekday = models.IntegerField(choices=Weekday.choices)
+    # Null = recurring weekly window; set = override for that calendar date only.
+    specific_date = models.DateField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="When set, this row overrides weekly hours for this date only.",
+    )
     start_time = models.TimeField()
     end_time = models.TimeField()
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ["weekday", "start_time"]
+        ordering = ["specific_date", "weekday", "start_time"]
         verbose_name_plural = "doctor availabilities"
 
     def __str__(self):
         clinic = f" @ {self.clinic}" if self.clinic_id else ""
+        if self.specific_date:
+            day = self.specific_date.isoformat()
+        else:
+            day = self.get_weekday_display()
         return (
-            f"{self.doctor}{clinic} — {self.get_weekday_display()} "
+            f"{self.doctor}{clinic} — {day} "
             f"{self.start_time}-{self.end_time}"
         )

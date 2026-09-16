@@ -96,6 +96,8 @@ def generate_slots_for_windows(
 def _window_dicts(day_rows: list[DoctorAvailability]) -> list[dict]:
     windows = []
     for row in day_rows:
+        if not row.is_active:
+            continue
         windows.append(
             {
                 "start": row.start_time.strftime("%H:%M:%S"),
@@ -125,25 +127,23 @@ def upcoming_available_dates(
     days_ahead: int = 42,
     limit: int = 42,
 ) -> list[dict]:
-    """Return upcoming dates matching doctor's active weekday availability.
-
-    When ``clinic`` is set, only that clinic's schedule is used.
-    When omitted, only rows with a clinic FK are considered (legacy null ignored).
-    Multiple windows on the same weekday are merged into ``windows``.
-    Booked times are doctor-wide (blocks all clinics for double-book safety).
-    """
+    """Return upcoming dates with open windows (weekly + date overrides)."""
     today = pakistan_today()
-    qs = DoctorAvailability.objects.filter(doctor=doctor, is_active=True)
+    qs = DoctorAvailability.objects.filter(doctor=doctor)
     if clinic is not None:
         clinic_id = clinic.pk if isinstance(clinic, Clinic) else int(clinic)
         qs = qs.filter(clinic_id=clinic_id)
     else:
         qs = qs.filter(clinic__isnull=False)
-    slots = list(qs.order_by("weekday", "start_time"))
 
+    slots = list(qs.order_by("specific_date", "weekday", "start_time"))
     by_weekday: dict[int, list[DoctorAvailability]] = {}
+    by_date: dict[str, list[DoctorAvailability]] = {}
     for slot in slots:
-        by_weekday.setdefault(slot.weekday, []).append(slot)
+        if slot.specific_date is not None:
+            by_date.setdefault(slot.specific_date.isoformat(), []).append(slot)
+        elif slot.is_active:
+            by_weekday.setdefault(slot.weekday, []).append(slot)
 
     booked_times_by_date: dict[str, list[str]] = {}
     for appt in (
@@ -158,30 +158,40 @@ def upcoming_available_dates(
     options: list[dict] = []
     for offset in range(0, days_ahead + 1):
         day = today + timedelta(days=offset)
-        weekday = day.weekday()
-        day_slots = by_weekday.get(weekday)
-        if day_slots:
+        key = day.isoformat()
+
+        if key in by_date:
+            day_slots = by_date[key]
             windows = _window_dicts(day_slots)
-            key = day.isoformat()
-            booked_times = sorted(set(booked_times_by_date.get(key, [])))
-            # Earliest start / representative end for backward-compatible fields
-            starts = [w["start"] for w in windows]
-            ends = [w["end"] for w in windows]
-            options.append(
-                {
-                    "date": key,
-                    "label": day.strftime("%a %d %b %Y"),
-                    "start": min(starts),
-                    "end": max(ends) if "00:00:00" not in ends else "00:00:00",
-                    "timing": _timing_label(windows),
-                    "windows": windows,
-                    "booked_count": len(booked_times),
-                    "booked_times": booked_times,
-                    "clinic_id": (
-                        day_slots[0].clinic_id if day_slots[0].clinic_id else None
-                    ),
-                }
-            )
+            if not windows:
+                # Explicit closed override (or empty active windows).
+                continue
+            clinic_id_for_day = day_slots[0].clinic_id if day_slots[0].clinic_id else None
+        else:
+            day_slots = by_weekday.get(day.weekday())
+            if not day_slots:
+                continue
+            windows = _window_dicts(day_slots)
+            if not windows:
+                continue
+            clinic_id_for_day = day_slots[0].clinic_id if day_slots[0].clinic_id else None
+
+        booked_times = sorted(set(booked_times_by_date.get(key, [])))
+        starts = [w["start"] for w in windows]
+        ends = [w["end"] for w in windows]
+        options.append(
+            {
+                "date": key,
+                "label": day.strftime("%a %d %b %Y"),
+                "start": min(starts),
+                "end": max(ends) if "00:00:00" not in ends else "00:00:00",
+                "timing": _timing_label(windows),
+                "windows": windows,
+                "booked_count": len(booked_times),
+                "booked_times": booked_times,
+                "clinic_id": clinic_id_for_day,
+            }
+        )
         if len(options) >= limit:
             break
     return options

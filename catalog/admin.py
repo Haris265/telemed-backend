@@ -61,6 +61,14 @@ class DoctorSubscriptionAdmin(admin.ModelAdmin):
 
 @admin.register(DoctorAvailability)
 class DoctorAvailabilityAdmin(admin.ModelAdmin):
-    list_display = ("doctor", "clinic", "weekday", "start_time", "end_time", "is_active")
-    list_filter = ("weekday", "is_active")
+    list_display = (
+        "doctor",
+        "clinic",
+        "weekday",
+        "specific_date",
+        "start_time",
+        "end_time",
+        "is_active",
+    )
+    list_filter = ("weekday", "is_active", "specific_date")
     raw_id_fields = ("doctor", "clinic")

@@ -16,6 +16,7 @@ from .doctor_views import (
     DoctorAppointmentStartVisitView,
     DoctorClinicAvailabilityListCreateView,
     DoctorClinicAvailabilityReplaceView,
+    DoctorClinicDateAvailabilityReplaceView,
     DoctorClinicAvailableDatesView,
     DoctorClinicDetailView,
     DoctorClinicListCreateView,
@@ -110,6 +111,11 @@ doctor_urlpatterns = [
         "clinics/<int:pk>/availability/replace/",
         DoctorClinicAvailabilityReplaceView.as_view(),
         name="doctor-clinic-availability-replace",
+    ),
+    path(
+        "clinics/<int:pk>/availability/date/",
+        DoctorClinicDateAvailabilityReplaceView.as_view(),
+        name="doctor-clinic-availability-date",
     ),
     path(
         "clinics/<int:pk>/available-dates/",

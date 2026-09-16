@@ -200,7 +200,7 @@ class DoctorClinicAvailabilityListCreateView(APIView):
         link = self.get_link(request, pk)
         slots = DoctorAvailability.objects.filter(
             doctor=link.doctor, clinic=link.clinic
-        ).order_by("weekday", "start_time")
+        ).order_by("specific_date", "weekday", "start_time")
         return Response(DoctorAvailabilitySerializer(slots, many=True).data)
 
     def post(self, request, pk: int):
@@ -216,7 +216,7 @@ class DoctorClinicAvailabilityListCreateView(APIView):
 
 
 class DoctorClinicAvailabilityReplaceView(APIView):
-    """Replace full weekly schedule for a clinic in one request."""
+    """Replace weekly (recurring) schedule for a clinic; date overrides are kept."""
 
     permission_classes = [IsDoctor]
 
@@ -235,9 +235,9 @@ class DoctorClinicAvailabilityReplaceView(APIView):
 
         validated = []
         for item in slots:
-            serializer = DoctorAvailabilitySerializer(
-                data={**item, "clinic": link.clinic_id}
-            )
+            payload = {**item, "clinic": link.clinic_id}
+            payload.pop("specific_date", None)
+            serializer = DoctorAvailabilitySerializer(data=payload)
             serializer.is_valid(raise_exception=True)
             data = serializer.validated_data
             validated.append(
@@ -246,11 +246,12 @@ class DoctorClinicAvailabilityReplaceView(APIView):
                     "start_time": data["start_time"],
                     "end_time": data["end_time"],
                     "is_active": data.get("is_active", True),
+                    "specific_date": None,
                 }
             )
 
         DoctorAvailability.objects.filter(
-            doctor=link.doctor, clinic=link.clinic
+            doctor=link.doctor, clinic=link.clinic, specific_date__isnull=True
         ).delete()
         objs = [
             DoctorAvailability(doctor=link.doctor, clinic=link.clinic, **data)
@@ -258,9 +259,141 @@ class DoctorClinicAvailabilityReplaceView(APIView):
         ]
         DoctorAvailability.objects.bulk_create(objs)
         result = DoctorAvailability.objects.filter(
-            doctor=link.doctor, clinic=link.clinic
+            doctor=link.doctor, clinic=link.clinic, specific_date__isnull=True
         ).order_by("weekday", "start_time")
         return Response(DoctorAvailabilitySerializer(result, many=True).data)
+
+
+class DoctorClinicDateAvailabilityReplaceView(APIView):
+    """Replace availability windows for a single calendar date.
+
+    Body:
+      {
+        "date": "YYYY-MM-DD",
+        "slots": [{"start_time": "09:00:00", "end_time": "13:00:00"}, ...],
+        "closed": false
+      }
+
+    - closed=true → day closed (weekly hours ignored)
+    - closed=false + slots → date-specific hours
+    - closed=false + empty slots → clear override (fall back to weekly)
+    """
+
+    permission_classes = [IsDoctor]
+
+    def put(self, request, pk: int):
+        link = get_object_or_404(
+            DoctorClinic.objects.select_related("clinic"),
+            pk=pk,
+            doctor=request.user.doctor_profile,
+        )
+        raw_date = request.data.get("date")
+        if not raw_date:
+            return Response(
+                {"detail": "date is required (YYYY-MM-DD)."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            from datetime import date as date_cls
+
+            if isinstance(raw_date, date_cls):
+                specific_date = raw_date
+            else:
+                specific_date = date_cls.fromisoformat(str(raw_date)[:10])
+        except ValueError:
+            return Response(
+                {"detail": "Invalid date. Use YYYY-MM-DD."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        closed = bool(request.data.get("closed", False))
+        slots = request.data.get("slots")
+        if slots is None:
+            slots = []
+        if not isinstance(slots, list):
+            return Response(
+                {"detail": "slots must be a list."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        weekday = specific_date.weekday()
+        base_qs = DoctorAvailability.objects.filter(
+            doctor=link.doctor,
+            clinic=link.clinic,
+            specific_date=specific_date,
+        )
+
+        if closed:
+            base_qs.delete()
+            marker = DoctorAvailability.objects.create(
+                doctor=link.doctor,
+                clinic=link.clinic,
+                weekday=weekday,
+                specific_date=specific_date,
+                start_time=time(0, 0),
+                end_time=time(0, 0),
+                is_active=False,
+            )
+            return Response(
+                {
+                    "date": specific_date.isoformat(),
+                    "closed": True,
+                    "slots": DoctorAvailabilitySerializer([marker], many=True).data,
+                }
+            )
+
+        if not slots:
+            # Clear override — weekly schedule applies again.
+            base_qs.delete()
+            return Response(
+                {
+                    "date": specific_date.isoformat(),
+                    "closed": False,
+                    "slots": [],
+                }
+            )
+
+        validated = []
+        for item in slots:
+            serializer = DoctorAvailabilitySerializer(
+                data={
+                    **item,
+                    "clinic": link.clinic_id,
+                    "weekday": weekday,
+                    "specific_date": specific_date.isoformat(),
+                    "is_active": item.get("is_active", True),
+                }
+            )
+            serializer.is_valid(raise_exception=True)
+            data = serializer.validated_data
+            validated.append(
+                {
+                    "weekday": weekday,
+                    "specific_date": specific_date,
+                    "start_time": data["start_time"],
+                    "end_time": data["end_time"],
+                    "is_active": data.get("is_active", True),
+                }
+            )
+
+        base_qs.delete()
+        objs = [
+            DoctorAvailability(doctor=link.doctor, clinic=link.clinic, **data)
+            for data in validated
+        ]
+        DoctorAvailability.objects.bulk_create(objs)
+        result = DoctorAvailability.objects.filter(
+            doctor=link.doctor,
+            clinic=link.clinic,
+            specific_date=specific_date,
+        ).order_by("start_time")
+        return Response(
+            {
+                "date": specific_date.isoformat(),
+                "closed": False,
+                "slots": DoctorAvailabilitySerializer(result, many=True).data,
+            }
+        )
 
 
 class DoctorDashboardView(APIView):

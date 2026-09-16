@@ -75,6 +75,13 @@ def _extract_message_batches(
 def _resolve_client_and_doctor(
     phone_number_id: str,
 ) -> tuple[MetaWhatsAppClient, DoctorWhatsAppAccount | None]:
+    """Resolve outbound client + optional bound doctor for an inbound Meta number.
+
+    If any doctor CONNECTED their WhatsApp to this Meta phone_number_id
+    (including the shared test/platform number via manual connect), the bot
+    runs for that doctor only. Otherwise use platform credentials and the
+    marketplace specialty → doctor flow.
+    """
     phone_number_id = (phone_number_id or "").strip()
     if phone_number_id:
         account = (
@@ -91,6 +98,7 @@ def _resolve_client_and_doctor(
                 phone_number_id=account.phone_number_id,
             )
             return client, account
+
     return MetaWhatsAppClient.platform(), None
 
 
@@ -170,14 +178,32 @@ class WhatsAppSimulateView(APIView):
         if profile_name:
             msg["profile_name"] = profile_name
 
+        # doctor_id mirrors a linked / Meta-testing WhatsApp number for that doctor.
         bound_doctor = None
-        if doctor_id:
+        if doctor_id is not None and str(doctor_id).strip() != "":
             from catalog.models import DoctorProfile
 
-            bound_doctor = DoctorProfile.objects.filter(id=doctor_id, is_active=True).first()
+            try:
+                did = int(doctor_id)
+            except (TypeError, ValueError):
+                return Response(
+                    {"detail": "doctor_id must be an integer"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            bound_doctor = DoctorProfile.objects.filter(id=did, is_active=True).first()
+            if not bound_doctor:
+                return Response(
+                    {"detail": "doctor_id not found or inactive"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
 
         handle_inbound_message(msg, CaptureClient(), doctor=bound_doctor)
-        return Response({"replies": replies})
+        return Response(
+            {
+                "replies": replies,
+                "bound_doctor_id": bound_doctor.id if bound_doctor else None,
+            }
+        )
 
 
 class EmbeddedSignupPageView(View):
@@ -199,6 +225,13 @@ class EmbeddedSignupPageView(View):
                 status=400,
                 content_type="text/plain",
             )
+        redirect_uri = (request.GET.get("redirect_uri") or "").strip()
+        if not redirect_uri:
+            redirect_uri = (
+                getattr(settings, "DOCTOR_WEB_WHATSAPP_REDIRECT_URI", "") or ""
+            ).strip()
+        if not redirect_uri:
+            redirect_uri = "opd-doctor://whatsapp-callback"
         return render(
             request,
             "whatsapp/embedded_signup.html",
@@ -206,6 +239,6 @@ class EmbeddedSignupPageView(View):
                 "app_id": app_id,
                 "config_id": config_id,
                 "state": state,
-                "redirect_scheme": "opd-doctor://whatsapp-callback",
+                "redirect_scheme": redirect_uri,
             },
         )

@@ -266,5 +266,5 @@ class AdminDoctorAvailabilityListView(generics.ListAPIView):
     def get_queryset(self):
         doctor_uuid = self.kwargs["uuid"]
         return DoctorAvailability.objects.filter(doctor__uuid=doctor_uuid).order_by(
-            "weekday", "start_time"
+            "specific_date", "weekday", "start_time"
         )

@@ -189,7 +189,10 @@ class PatientDoctorAvailabilityView(APIView):
                 )
 
         weekly_qs = DoctorAvailability.objects.filter(
-            doctor=doctor, is_active=True, clinic__isnull=False
+            doctor=doctor,
+            is_active=True,
+            clinic__isnull=False,
+            specific_date__isnull=True,
         )
         if clinic is not None:
             weekly_qs = weekly_qs.filter(clinic=clinic)

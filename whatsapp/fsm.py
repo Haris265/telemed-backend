@@ -24,11 +24,19 @@ logger = logging.getLogger(__name__)
 
 MENU_TEXT = (
     "Welcome to PatientCare.\n\n"
-    "Reply with:\n"
+    "Book a clinic token on WhatsApp — reply with:\n"
     "1. Request OTP for Login\n"
     "2. Book an appointment\n"
     "3. View My Appointments"
 )
+
+CANCEL_CHOICES = ("0", "cancel", "menu")
+MARKETPLACE_STATES = {
+    WhatsAppSession.State.AWAITING_SPECIALITY,
+    WhatsAppSession.State.AWAITING_DOCTOR,
+    WhatsAppSession.State.AWAITING_CLINIC_DOCTOR,
+    WhatsAppSession.State.AWAITING_BOOKING_MODE,
+}
 
 
 def _normalize_phone(phone: str) -> str:
@@ -127,9 +135,34 @@ def _doctor_clinics(doctor: DoctorProfile) -> list[Clinic]:
     )
 
 
+def _bound_doctor(session: WhatsAppSession) -> DoctorProfile | None:
+    if not isinstance(session.context, dict):
+        return None
+    bound_id = session.context.get("bound_doctor_id")
+    if not bound_id:
+        return None
+    return DoctorProfile.objects.filter(id=bound_id, is_active=True).first()
+
+
+def _menu_text(session: WhatsAppSession) -> str:
+    doctor = _bound_doctor(session)
+    if doctor:
+        return (
+            f"You're messaging Dr. {doctor.full_name}'s WhatsApp.\n\n"
+            "Reply with:\n"
+            "1. Request OTP for Login\n"
+            "2. Book an appointment\n"
+            "3. View My Appointments"
+        )
+    return MENU_TEXT
+
+
 def _format_availability(doctor: DoctorProfile, clinic: Clinic | None = None) -> str:
     qs = DoctorAvailability.objects.filter(
-        doctor=doctor, is_active=True, clinic__isnull=False
+        doctor=doctor,
+        is_active=True,
+        clinic__isnull=False,
+        specific_date__isnull=True,
     )
     if clinic is not None:
         qs = qs.filter(clinic=clinic)
@@ -286,21 +319,22 @@ def _ctx(session: WhatsAppSession, **kwargs) -> dict:
 
 
 def _start_booking(session: WhatsAppSession, client, phone: str) -> None:
-    # Per-doctor WhatsApp number: skip specialty/doctor pickers.
-    bound_id = session.context.get("bound_doctor_id")
-    if bound_id:
-        doctor = DoctorProfile.objects.filter(id=bound_id, is_active=True).first()
-        if not doctor:
-            client.send_text(
-                phone,
-                "This doctor's WhatsApp booking is unavailable right now.\n\n" + MENU_TEXT,
-            )
-            _reset_to_menu(session)
-            return
-        client.send_text(phone, f"Booking with Dr. {doctor.full_name}.")
-        _prompt_clinic_selection(session, client, phone, doctor)
+    # Dedicated doctor WhatsApp: skip specialty/doctor pickers.
+    bound = _bound_doctor(session)
+    if session.context.get("bound_doctor_id") and not bound:
+        client.send_text(
+            phone,
+            "This doctor's WhatsApp booking is unavailable right now.\n\n"
+            + _menu_text(session),
+        )
+        _reset_to_menu(session)
+        return
+    if bound:
+        client.send_text(phone, f"Booking with Dr. {bound.full_name}.")
+        _prompt_clinic_selection(session, client, phone, bound)
         return
 
+    # Marketplace: speciality → doctor → clinic → date → slot
     specialities = _active_specialities()
     if not specialities:
         client.send_text(phone, "No specialities available right now. Please try later.")
@@ -322,7 +356,7 @@ def _offer_doctors(
     if not doctors:
         client.send_text(
             phone,
-            f"No doctors available for {speciality.name} right now.\n\n{MENU_TEXT}",
+            f"No doctors available for {speciality.name} right now.\n\n{_menu_text(session)}",
         )
         _reset_to_menu(session)
         return
@@ -346,7 +380,7 @@ def _prompt_clinic_selection(
     if not clinics:
         client.send_text(
             phone,
-            f"Dr. {doctor.full_name} has no clinic schedule yet.\n\n{MENU_TEXT}",
+            f"Dr. {doctor.full_name} has no clinic schedule yet.\n\n{_menu_text(session)}",
         )
         _reset_to_menu(session)
         return
@@ -377,7 +411,8 @@ def _prompt_date_selection(
     if not options:
         client.send_text(
             phone,
-            f"Dr. {doctor.full_name} has no upcoming dates at {clinic.name}.\n\n{MENU_TEXT}",
+            f"Dr. {doctor.full_name} has no upcoming dates at {clinic.name}.\n\n"
+            + _menu_text(session),
         )
         _reset_to_menu(session)
         return
@@ -413,16 +448,17 @@ def _prompt_slot_selection(
         session.save(update_fields=["state", "updated_at"])
         return
     session.state = WhatsAppSession.State.AWAITING_SLOT
-    session.context = {
-        **session.context,
-        "doctor_id": doctor.id,
-        "clinic_id": clinic.id,
-        "token_date": option["date"],
-        "date_label": option["label"],
-        "timing": option["timing"],
-        "start": option["start"],
-        "slot_options": slots,
-    }
+    session.context = _ctx(
+        session,
+        doctor_id=doctor.id,
+        clinic_id=clinic.id,
+        token_date=option["date"],
+        date_label=option["label"],
+        timing=option["timing"],
+        start=option["start"],
+        slot_options=slots,
+        date_options=session.context.get("date_options") or [],
+    )
     session.save(update_fields=["state", "context", "updated_at"])
     client.send_text(
         phone,
@@ -445,17 +481,18 @@ def _prompt_confirm(
 ) -> None:
     specs = ", ".join(s.name for s in doctor.specialities.filter(is_active=True)) or "—"
     session.state = WhatsAppSession.State.AWAITING_CONFIRM
-    session.context = {
-        "doctor_id": doctor.id,
-        "clinic_id": clinic.id,
-        "token_date": token_date,
-        "slot_time": slot_time,
-        "slot_label": slot_label,
-        "start": slot_time,
-        "timing": timing,
-        "date_label": date_label,
-        "clinic_name": clinic.name,
-    }
+    session.context = _ctx(
+        session,
+        doctor_id=doctor.id,
+        clinic_id=clinic.id,
+        token_date=token_date,
+        slot_time=slot_time,
+        slot_label=slot_label,
+        start=slot_time,
+        timing=timing,
+        date_label=date_label,
+        clinic_name=clinic.name,
+    )
     session.save(update_fields=["state", "context", "updated_at"])
     client.send_text(
         phone,
@@ -493,6 +530,24 @@ def _resolve_doctor_choice(text: str, ordered: list[DoctorProfile]) -> DoctorPro
     return None
 
 
+def _redirect_bound_away_from_marketplace(
+    session: WhatsAppSession, client, phone: str
+) -> bool:
+    """Linked/testing Meta number must never continue marketplace specialty flows."""
+    bound = _bound_doctor(session)
+    if not bound:
+        return False
+    if session.state not in MARKETPLACE_STATES:
+        return False
+    client.send_text(
+        phone,
+        f"You're messaging Dr. {bound.full_name}'s WhatsApp. "
+        "Booking stays with this doctor.\n",
+    )
+    _start_booking(session, client, phone)
+    return True
+
+
 def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = None) -> None:
     phone = _normalize_phone(str(msg.get("from", "")))
     if not phone:
@@ -506,12 +561,21 @@ def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = Non
         session.last_message_id = message_id
         session.save(update_fields=["last_message_id", "updated_at"])
 
+    # Meta Embedded Signup or testing/manual connect: bind FSM to this doctor only.
+    # Bind only when webhook resolved a dedicated doctor number.
+    # Platform / shared Meta number passes doctor=None → clear any stale bind
+    # left over from testing/manual connect on the same credentials.
     if doctor is not None:
         ctx = dict(session.context or {})
         if ctx.get("bound_doctor_id") != doctor.id:
             ctx["bound_doctor_id"] = doctor.id
             session.context = ctx
             session.save(update_fields=["context", "updated_at"])
+    elif isinstance(session.context, dict) and session.context.get("bound_doctor_id"):
+        ctx = dict(session.context)
+        ctx.pop("bound_doctor_id", None)
+        session.context = ctx
+        session.save(update_fields=["context", "updated_at"])
 
     text = _message_text(msg)
     if not text:
@@ -537,7 +601,7 @@ def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = Non
             _reset_to_menu(session)
             client.send_text(
                 phone,
-                f"Thanks {name}! Your PatientCare profile is ready.\n\n{MENU_TEXT}",
+                f"Thanks {name}! Your PatientCare profile is ready.\n\n{_menu_text(session)}",
             )
             return
 
@@ -547,7 +611,8 @@ def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = Non
             _reset_to_menu(session)
             client.send_text(
                 phone,
-                f"Welcome {profile_name}! Your PatientCare profile is ready.\n\n{MENU_TEXT}",
+                f"Welcome {profile_name}! Your PatientCare profile is ready.\n\n"
+                + _menu_text(session),
             )
             return
 
@@ -562,10 +627,21 @@ def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = Non
 
     choice = text.strip().lower()
 
+    if _redirect_bound_away_from_marketplace(session, client, phone):
+        return
+
+    # Stale mid-flow from removed clinic/mode menus → restart specialty booking.
+    if session.state in (
+        WhatsAppSession.State.AWAITING_BOOKING_MODE,
+        WhatsAppSession.State.AWAITING_CLINIC_DOCTOR,
+    ):
+        _start_booking(session, client, phone)
+        return
+
     if session.state == WhatsAppSession.State.AWAITING_SPECIALITY:
-        if choice in ("0", "cancel", "menu"):
+        if choice in CANCEL_CHOICES:
             _reset_to_menu(session)
-            client.send_text(phone, MENU_TEXT)
+            client.send_text(phone, _menu_text(session))
             return
 
         ids = session.context.get("speciality_ids") or []
@@ -585,7 +661,9 @@ def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = Non
                     "Multiple doctors matched:\n\n" + _format_doctors(doctor_matches[:10]),
                 )
                 session.state = WhatsAppSession.State.AWAITING_DOCTOR
-                session.context = {"doctor_ids": [d.id for d in doctor_matches[:10]]}
+                session.context = _ctx(
+                    session, doctor_ids=[d.id for d in doctor_matches[:10]]
+                )
                 session.save(update_fields=["state", "context", "updated_at"])
                 return
 
@@ -598,12 +676,15 @@ def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = Non
                     "Multiple specialities matched. Pick a number:\n\n"
                     + _format_specialities(name_hits),
                 )
-                session.context = {"speciality_ids": [s.id for s in name_hits]}
+                session.context = _ctx(
+                    session, speciality_ids=[s.id for s in name_hits]
+                )
                 session.save(update_fields=["context", "updated_at"])
                 return
             client.send_text(
                 phone,
-                "Could not find that speciality or doctor.\n\n" + _format_specialities(ordered),
+                "Could not find that speciality or doctor.\n\n"
+                + _format_specialities(ordered),
             )
             return
 
@@ -612,9 +693,9 @@ def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = Non
         return
 
     if session.state == WhatsAppSession.State.AWAITING_DOCTOR:
-        if choice in ("0", "cancel", "menu"):
+        if choice in CANCEL_CHOICES:
             _reset_to_menu(session)
-            client.send_text(phone, MENU_TEXT)
+            client.send_text(phone, _menu_text(session))
             return
         ids = session.context.get("doctor_ids") or []
         doctors = list(
@@ -634,26 +715,33 @@ def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = Non
                 "Multiple doctors matched. Pick a number or fuller name:\n\n"
                 + _format_doctors(resolved),
             )
-            session.context = {**session.context, "doctor_ids": [d.id for d in resolved]}
+            prev_speciality = session.context.get("speciality_id")
+            session.context = _ctx(
+                session,
+                doctor_ids=[d.id for d in resolved],
+                **({"speciality_id": prev_speciality} if prev_speciality else {}),
+            )
             session.save(update_fields=["context", "updated_at"])
             return
         _prompt_clinic_selection(session, client, phone, resolved)
         return
 
     if session.state == WhatsAppSession.State.AWAITING_CLINIC:
-        if choice in ("0", "cancel", "menu"):
+        if choice in CANCEL_CHOICES:
             _reset_to_menu(session)
-            client.send_text(phone, MENU_TEXT)
+            client.send_text(phone, _menu_text(session))
             return
-        doctor_id = session.context.get("doctor_id")
         clinic_ids = session.context.get("clinic_ids") or []
-        doctor = DoctorProfile.objects.filter(id=doctor_id, is_active=True).first()
         clinics = list(Clinic.objects.filter(id__in=clinic_ids, is_active=True))
         by_id = {c.id: c for c in clinics}
         ordered = [by_id[i] for i in clinic_ids if i in by_id]
+        doctor_id = session.context.get("doctor_id")
+        doctor = DoctorProfile.objects.filter(id=doctor_id, is_active=True).first()
         if not doctor or not ordered:
             _reset_to_menu(session)
-            client.send_text(phone, "Session expired. Please book again.\n\n" + MENU_TEXT)
+            client.send_text(
+                phone, "Session expired. Please book again.\n\n" + _menu_text(session)
+            )
             return
         idx = _parse_choice_index(text, len(ordered))
         if idx is None:
@@ -663,9 +751,9 @@ def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = Non
         return
 
     if session.state == WhatsAppSession.State.AWAITING_DATE:
-        if choice in ("0", "cancel", "menu"):
+        if choice in CANCEL_CHOICES:
             _reset_to_menu(session)
-            client.send_text(phone, MENU_TEXT)
+            client.send_text(phone, _menu_text(session))
             return
         options = session.context.get("date_options") or []
         doctor_id = session.context.get("doctor_id")
@@ -674,7 +762,9 @@ def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = Non
         clinic = Clinic.objects.filter(id=clinic_id, is_active=True).first()
         if not doctor or not clinic or not options:
             _reset_to_menu(session)
-            client.send_text(phone, "Session expired. Please book again.\n\n" + MENU_TEXT)
+            client.send_text(
+                phone, "Session expired. Please book again.\n\n" + _menu_text(session)
+            )
             return
         idx = _parse_choice_index(text, len(options))
         if idx is None:
@@ -687,9 +777,9 @@ def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = Non
         return
 
     if session.state == WhatsAppSession.State.AWAITING_SLOT:
-        if choice in ("0", "cancel", "menu"):
+        if choice in CANCEL_CHOICES:
             _reset_to_menu(session)
-            client.send_text(phone, MENU_TEXT)
+            client.send_text(phone, _menu_text(session))
             return
         slots = session.context.get("slot_options") or []
         doctor_id = session.context.get("doctor_id")
@@ -698,7 +788,9 @@ def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = Non
         clinic = Clinic.objects.filter(id=clinic_id, is_active=True).first()
         if not doctor or not clinic or not slots:
             _reset_to_menu(session)
-            client.send_text(phone, "Session expired. Please book again.\n\n" + MENU_TEXT)
+            client.send_text(
+                phone, "Session expired. Please book again.\n\n" + _menu_text(session)
+            )
             return
         idx = _parse_choice_index(text, len(slots))
         if idx is None:
@@ -720,9 +812,9 @@ def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = Non
         return
 
     if session.state == WhatsAppSession.State.AWAITING_CONFIRM:
-        if choice in ("0", "cancel", "menu", "no", "n"):
+        if choice in (*CANCEL_CHOICES, "no", "n"):
             _reset_to_menu(session)
-            client.send_text(phone, MENU_TEXT)
+            client.send_text(phone, _menu_text(session))
             return
         if choice not in ("1", "yes", "y", "confirm", "ok", "book"):
             doctor_id = session.context.get("doctor_id")
@@ -744,7 +836,10 @@ def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = Non
                 )
             else:
                 _reset_to_menu(session)
-                client.send_text(phone, "Session expired. Please book again.\n\n" + MENU_TEXT)
+                client.send_text(
+                    phone,
+                    "Session expired. Please book again.\n\n" + _menu_text(session),
+                )
             return
 
         doctor_id = session.context.get("doctor_id")
@@ -755,7 +850,18 @@ def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = Non
         clinic = Clinic.objects.filter(id=clinic_id, is_active=True).first()
         if not doctor or not clinic or not token_date_raw or not slot_raw:
             _reset_to_menu(session)
-            client.send_text(phone, "Doctor unavailable.\n\n" + MENU_TEXT)
+            client.send_text(phone, "Doctor unavailable.\n\n" + _menu_text(session))
+            return
+
+        # Linked number: only allow booking the bound doctor.
+        bound = _bound_doctor(session)
+        if bound and doctor.id != bound.id:
+            _reset_to_menu(session)
+            client.send_text(
+                phone,
+                f"This WhatsApp only books with Dr. {bound.full_name}.\n\n"
+                + _menu_text(session),
+            )
             return
 
         token_date = date.fromisoformat(token_date_raw)
@@ -774,12 +880,14 @@ def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = Non
             )
         except ValueError as exc:
             _reset_to_menu(session)
-            client.send_text(phone, f"{exc}\n\n{MENU_TEXT}")
+            client.send_text(phone, f"{exc}\n\n{_menu_text(session)}")
             return
         except Exception:
             logger.exception("Booking failed for %s / doctor %s", phone, doctor.id)
             _reset_to_menu(session)
-            client.send_text(phone, "Booking failed. Please try again.\n\n" + MENU_TEXT)
+            client.send_text(
+                phone, "Booking failed. Please try again.\n\n" + _menu_text(session)
+            )
             return
 
         when = appt.token_date.strftime("%d %b %Y")
@@ -794,7 +902,7 @@ def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = Non
             f"Time: {slot_label} (Pakistan)\n"
             f"Your token: {appt.token_code}\n\n"
             "Show this token at the clinic.\n\n"
-            f"{MENU_TEXT}",
+            f"{_menu_text(session)}",
         )
         return
 
@@ -815,7 +923,9 @@ def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = Non
             patient.save(update_fields=["is_verified", "updated_at"])
             cache.delete(f"otp:{phone}")
             _reset_to_menu(session)
-            client.send_text(phone, "Login successful. You are verified.\n\n" + MENU_TEXT)
+            client.send_text(
+                phone, "Login successful. You are verified.\n\n" + _menu_text(session)
+            )
         else:
             client.send_text(phone, "Invalid or expired OTP. Reply 1 to request a new OTP.")
             _reset_to_menu(session)
@@ -829,7 +939,9 @@ def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = Non
         session.save(update_fields=["state", "context", "updated_at"])
         client.send_text(
             phone,
-            f"Your PatientCare login OTP is: {otp}\nIt expires in 5 minutes.\nReply with the OTP to verify.",
+            f"Your PatientCare login OTP is: {otp}\n"
+            "It expires in 5 minutes.\n"
+            "Reply with the OTP to verify.",
         )
         return
 
@@ -843,4 +955,4 @@ def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = Non
         return
 
     _reset_to_menu(session)
-    client.send_text(phone, f"Hi {patient.name}!\n\n{MENU_TEXT}")
+    client.send_text(phone, f"Hi {patient.name}!\n\n{_menu_text(session)}")
