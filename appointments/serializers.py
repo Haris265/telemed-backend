@@ -80,6 +80,10 @@ class VisitAttachmentSerializer(serializers.ModelSerializer):
             "mime_type",
             "duration_seconds",
             "sent_via_whatsapp",
+            "transcript_text",
+            "summary_text",
+            "summary_status",
+            "summary_error",
             "created_at",
         )
         read_only_fields = fields
@@ -93,6 +97,26 @@ class VisitAttachmentSerializer(serializers.ModelSerializer):
         if request is not None:
             return request.build_absolute_uri(url)
         return url
+
+
+class VisitAttachmentSummaryUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VisitAttachment
+        fields = ("summary_text",)
+
+    def validate_summary_text(self, value):
+        return (value or "").strip()
+
+    def update(self, instance, validated_data):
+        instance.summary_text = validated_data.get(
+            "summary_text", instance.summary_text
+        )
+        instance.summary_status = VisitAttachment.SummaryStatus.READY
+        instance.summary_error = ""
+        instance.save(
+            update_fields=["summary_text", "summary_status", "summary_error"]
+        )
+        return instance
 
 
 class AppointmentSerializer(serializers.ModelSerializer):

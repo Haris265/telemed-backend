@@ -179,3 +179,10 @@ META_GRAPH_VERSION = os.getenv("META_GRAPH_VERSION", "v21.0").strip() or "v21.0"
 DOCTOR_WEB_WHATSAPP_REDIRECT_URI = os.getenv(
     "DOCTOR_WEB_WHATSAPP_REDIRECT_URI", ""
 ).strip()
+
+# Voice note → Roman Urdu summary (Google Gemini)
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_SUMMARY_MODEL = (
+    os.getenv("GEMINI_SUMMARY_MODEL", "gemini-3.5-flash-lite").strip()
+    or "gemini-3.5-flash-lite"
+)

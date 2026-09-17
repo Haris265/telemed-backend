@@ -18,8 +18,10 @@ from appointments.serializers import (
     DoctorBookSerializer,
     PrescriptionSerializer,
     VisitAttachmentSerializer,
+    VisitAttachmentSummaryUpdateSerializer,
 )
 from appointments.services import book_token, upcoming_available_dates
+from appointments.voice_summary import generate_voice_summary
 from patients.models import PatientProfile
 from patients.serializers import normalize_phone
 
@@ -691,7 +693,15 @@ class DoctorAppointmentAttachmentListCreateView(APIView):
             original_name=upload.name or "",
             mime_type=mime,
             duration_seconds=duration_int,
+            summary_status=(
+                VisitAttachment.SummaryStatus.PENDING
+                if kind == VisitAttachment.Kind.VOICE
+                else VisitAttachment.SummaryStatus.SKIPPED
+            ),
         )
+        if kind == VisitAttachment.Kind.VOICE:
+            generate_voice_summary(att.id)
+            att.refresh_from_db()
         return Response(
             VisitAttachmentSerializer(att, context={"request": request}).data,
             status=status.HTTP_201_CREATED,
@@ -700,6 +710,36 @@ class DoctorAppointmentAttachmentListCreateView(APIView):
 
 class DoctorAppointmentAttachmentDetailView(APIView):
     permission_classes = [IsDoctor]
+    http_method_names = ["get", "patch", "delete", "head", "options"]
+
+    def get(self, request, pk, attachment_id):
+        appointment = get_doctor_appointment(request.user.doctor_profile, pk)
+        att = get_object_or_404(
+            VisitAttachment, pk=attachment_id, appointment=appointment
+        )
+        return Response(
+            VisitAttachmentSerializer(att, context={"request": request}).data
+        )
+
+    def patch(self, request, pk, attachment_id):
+        appointment = get_doctor_appointment(request.user.doctor_profile, pk)
+        att = get_object_or_404(
+            VisitAttachment, pk=attachment_id, appointment=appointment
+        )
+        if att.kind != VisitAttachment.Kind.VOICE:
+            return Response(
+                {"detail": "Only voice attachments have an editable summary."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        ser = VisitAttachmentSummaryUpdateSerializer(
+            att, data=request.data, partial=True
+        )
+        ser.is_valid(raise_exception=True)
+        ser.save()
+        att.refresh_from_db()
+        return Response(
+            VisitAttachmentSerializer(att, context={"request": request}).data
+        )
 
     def delete(self, request, pk, attachment_id):
         appointment = get_doctor_appointment(request.user.doctor_profile, pk)
@@ -710,6 +750,26 @@ class DoctorAppointmentAttachmentDetailView(APIView):
             att.file.delete(save=False)
         att.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class DoctorAppointmentAttachmentRegenerateSummaryView(APIView):
+    permission_classes = [IsDoctor]
+
+    def post(self, request, pk, attachment_id):
+        appointment = get_doctor_appointment(request.user.doctor_profile, pk)
+        att = get_object_or_404(
+            VisitAttachment, pk=attachment_id, appointment=appointment
+        )
+        if att.kind != VisitAttachment.Kind.VOICE:
+            return Response(
+                {"detail": "Only voice attachments can be summarized."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        generate_voice_summary(att.id)
+        att.refresh_from_db()
+        return Response(
+            VisitAttachmentSerializer(att, context={"request": request}).data
+        )
 
 
 class DoctorClinicalNoteView(APIView):

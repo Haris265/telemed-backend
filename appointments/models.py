@@ -136,6 +136,12 @@ class VisitAttachment(models.Model):
         IMAGE = "image", "Image"
         VOICE = "voice", "Voice"
 
+    class SummaryStatus(models.TextChoices):
+        PENDING = "pending", "Pending"
+        READY = "ready", "Ready"
+        FAILED = "failed", "Failed"
+        SKIPPED = "skipped", "Skipped"
+
     appointment = models.ForeignKey(
         Appointment,
         on_delete=models.CASCADE,
@@ -147,6 +153,14 @@ class VisitAttachment(models.Model):
     mime_type = models.CharField(max_length=100, blank=True, default="")
     duration_seconds = models.PositiveIntegerField(null=True, blank=True)
     sent_via_whatsapp = models.BooleanField(default=False)
+    transcript_text = models.TextField(blank=True, default="")
+    summary_text = models.TextField(blank=True, default="")
+    summary_status = models.CharField(
+        max_length=16,
+        choices=SummaryStatus.choices,
+        default=SummaryStatus.SKIPPED,
+    )
+    summary_error = models.CharField(max_length=500, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
