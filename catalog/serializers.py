@@ -166,6 +166,64 @@ class DoctorProfileSerializer(serializers.ModelSerializer):
         return instance
 
 
+class DoctorMeUpdateSerializer(serializers.ModelSerializer):
+    """Doctor self-service profile fields (specialities/active stay admin-managed)."""
+
+    email = serializers.EmailField(required=False)
+
+    class Meta:
+        model = DoctorProfile
+        fields = ("first_name", "last_name", "email", "session_time")
+
+    def validate_session_time(self, value):
+        if value < 1:
+            raise serializers.ValidationError("session_time must be at least 1 minute.")
+        return value
+
+    def validate_first_name(self, value):
+        value = (value or "").strip()
+        if not value:
+            raise serializers.ValidationError("This field may not be blank.")
+        return value
+
+    def validate_last_name(self, value):
+        value = (value or "").strip()
+        if not value:
+            raise serializers.ValidationError("This field may not be blank.")
+        return value
+
+    def validate_email(self, value):
+        value = (value or "").strip().lower()
+        if not value:
+            raise serializers.ValidationError("This field may not be blank.")
+        user = self.instance.user
+        if User.objects.filter(email__iexact=value).exclude(pk=user.pk).exists():
+            raise serializers.ValidationError("A user with this email already exists.")
+        if User.objects.filter(username__iexact=value).exclude(pk=user.pk).exists():
+            raise serializers.ValidationError("A user with this username already exists.")
+        return value
+
+    def update(self, instance, validated_data):
+        email = validated_data.pop("email", None)
+        instance = super().update(instance, validated_data)
+        user = instance.user
+        user_updates = []
+        if user.first_name != instance.first_name:
+            user.first_name = instance.first_name
+            user_updates.append("first_name")
+        if user.last_name != instance.last_name:
+            user.last_name = instance.last_name
+            user_updates.append("last_name")
+        if email is not None and (user.email != email or user.username != email):
+            user.email = email
+            user.username = email
+            user_updates.extend(["email", "username"])
+        if user_updates:
+            # de-dupe while preserving order
+            user.save(update_fields=list(dict.fromkeys(user_updates)))
+        return instance
+
+
 class DoctorSubscriptionSerializer(serializers.ModelSerializer):
     doctor_name = serializers.CharField(source="doctor.full_name", read_only=True)
     doctor_uuid = serializers.UUIDField(source="doctor.uuid", read_only=True)
@@ -230,7 +288,6 @@ class DoctorAvailabilitySerializer(serializers.ModelSerializer):
             "clinic_name",
             "weekday",
             "weekday_display",
-            "specific_date",
             "start_time",
             "end_time",
             "is_active",
@@ -242,32 +299,8 @@ class DoctorAvailabilitySerializer(serializers.ModelSerializer):
         start = attrs.get("start_time") or getattr(self.instance, "start_time", None)
         end = attrs.get("end_time") or getattr(self.instance, "end_time", None)
         # Midnight (00:00) means end of day, so 09:00–00:00 is valid.
-        # Closed-day markers use 00:00–00:00 with is_active=False.
-        is_active = attrs.get("is_active")
-        if is_active is None:
-            is_active = getattr(self.instance, "is_active", True)
         if start and end and end != time(0, 0) and start >= end:
             raise serializers.ValidationError("end_time must be after start_time.")
-        if start == end == time(0, 0) and is_active:
-            raise serializers.ValidationError(
-                "00:00–00:00 is only allowed for closed-day markers."
-            )
-
-        specific_date = attrs.get("specific_date")
-        if specific_date is None and self.instance is not None:
-            specific_date = self.instance.specific_date
-        if specific_date is not None:
-            # Python weekday: Mon=0 … Sun=6 (matches DoctorAvailability.Weekday)
-            expected = specific_date.weekday()
-            weekday = attrs.get("weekday")
-            if weekday is None and self.instance is not None:
-                weekday = self.instance.weekday
-            if weekday is None:
-                attrs["weekday"] = expected
-            elif weekday != expected:
-                raise serializers.ValidationError(
-                    {"weekday": "weekday must match specific_date."}
-                )
         return attrs
 
 
@@ -287,9 +320,7 @@ class DoctorClinicSerializer(serializers.ModelSerializer):
         read_only_fields = ("created_at",)
 
     def get_schedule_count(self, obj):
-        return obj.clinic.availabilities.filter(
-            doctor=obj.doctor, is_active=True, specific_date__isnull=True
-        ).count()
+        return obj.clinic.availabilities.filter(doctor=obj.doctor, is_active=True).count()
 
 
 class DoctorClinicCreateSerializer(serializers.Serializer):

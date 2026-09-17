@@ -29,6 +29,7 @@ from .serializers import (
     DoctorClinicCreateSerializer,
     DoctorClinicSerializer,
     DoctorClinicUpdateSerializer,
+    DoctorMeUpdateSerializer,
     DoctorProfileSerializer,
 )
 
@@ -112,6 +113,15 @@ class DoctorMeView(APIView):
 
     def get(self, request):
         doctor = request.user.doctor_profile
+        return Response(DoctorProfileSerializer(doctor).data)
+
+    def patch(self, request):
+        doctor = request.user.doctor_profile
+        serializer = DoctorMeUpdateSerializer(
+            doctor, data=request.data, partial=True
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
         return Response(DoctorProfileSerializer(doctor).data)
 
 
