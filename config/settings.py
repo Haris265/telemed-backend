@@ -180,9 +180,12 @@ DOCTOR_WEB_WHATSAPP_REDIRECT_URI = os.getenv(
     "DOCTOR_WEB_WHATSAPP_REDIRECT_URI", ""
 ).strip()
 
-# Voice note → Roman Urdu summary (Google Gemini)
+# Voice note → Roman Urdu summary / payment slip OCR (Google Gemini)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_SUMMARY_MODEL = (
     os.getenv("GEMINI_SUMMARY_MODEL", "gemini-3.5-flash-lite").strip()
     or "gemini-3.5-flash-lite"
+)
+GEMINI_OCR_MODEL = (
+    os.getenv("GEMINI_OCR_MODEL", "").strip() or GEMINI_SUMMARY_MODEL
 )

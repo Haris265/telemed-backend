@@ -25,9 +25,10 @@ from appointments.voice_summary import generate_voice_summary
 from patients.models import PatientProfile
 from patients.serializers import normalize_phone
 
-from .models import DoctorAvailability, DoctorClinic, DoctorProfile
+from .models import DoctorAvailability, DoctorBankAccount, DoctorClinic, DoctorProfile
 from .serializers import (
     DoctorAvailabilitySerializer,
+    DoctorBankAccountSerializer,
     DoctorClinicCreateSerializer,
     DoctorClinicSerializer,
     DoctorClinicUpdateSerializer,
@@ -114,7 +115,11 @@ class DoctorMeView(APIView):
     permission_classes = [IsDoctor]
 
     def get(self, request):
-        doctor = request.user.doctor_profile
+        doctor = (
+            DoctorProfile.objects.select_related("user")
+            .prefetch_related("specialities", "bank_accounts")
+            .get(pk=request.user.doctor_profile.pk)
+        )
         return Response(DoctorProfileSerializer(doctor).data)
 
     def patch(self, request):
@@ -124,7 +129,69 @@ class DoctorMeView(APIView):
         )
         serializer.is_valid(raise_exception=True)
         serializer.save()
+        doctor = (
+            DoctorProfile.objects.select_related("user")
+            .prefetch_related("specialities", "bank_accounts")
+            .get(pk=doctor.pk)
+        )
         return Response(DoctorProfileSerializer(doctor).data)
+
+
+class DoctorBankAccountListCreateView(APIView):
+    permission_classes = [IsDoctor]
+
+    def get(self, request):
+        doctor = request.user.doctor_profile
+        accounts = doctor.bank_accounts.all()
+        return Response(DoctorBankAccountSerializer(accounts, many=True).data)
+
+    def post(self, request):
+        doctor = request.user.doctor_profile
+        serializer = DoctorBankAccountSerializer(
+            data=request.data, context={"doctor": doctor}
+        )
+        serializer.is_valid(raise_exception=True)
+        account = serializer.save()
+        return Response(
+            DoctorBankAccountSerializer(account).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class DoctorBankAccountDetailView(APIView):
+    permission_classes = [IsDoctor]
+
+    def get_object(self, doctor, pk: int) -> DoctorBankAccount:
+        return get_object_or_404(DoctorBankAccount, pk=pk, doctor=doctor)
+
+    def get(self, request, pk: int):
+        account = self.get_object(request.user.doctor_profile, pk)
+        return Response(DoctorBankAccountSerializer(account).data)
+
+    def patch(self, request, pk: int):
+        doctor = request.user.doctor_profile
+        account = self.get_object(doctor, pk)
+        serializer = DoctorBankAccountSerializer(
+            account, data=request.data, partial=True, context={"doctor": doctor}
+        )
+        serializer.is_valid(raise_exception=True)
+        account = serializer.save()
+        return Response(DoctorBankAccountSerializer(account).data)
+
+    def delete(self, request, pk: int):
+        account = self.get_object(request.user.doctor_profile, pk)
+        was_primary = account.is_primary
+        account.delete()
+        if was_primary:
+            next_account = (
+                request.user.doctor_profile.bank_accounts.filter(is_active=True)
+                .order_by("-created_at")
+                .first()
+            )
+            if next_account:
+                next_account.is_primary = True
+                next_account.save(update_fields=["is_primary", "updated_at"])
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class DoctorClinicListCreateView(APIView):
@@ -737,6 +804,20 @@ class DoctorAppointmentAttachmentDetailView(APIView):
         ser.is_valid(raise_exception=True)
         ser.save()
         att.refresh_from_db()
+        try:
+            from appointments.voice_summary import apply_follow_up_from_summary
+
+            apply_follow_up_from_summary(att)
+            att.refresh_from_db()
+        except ImportError:
+            pass
+        except Exception:
+            # Soft-fail: edited summary still saved even if follow-up extract fails
+            import logging
+
+            logging.getLogger(__name__).exception(
+                "Follow-up extract failed for attachment %s", att.id
+            )
         return Response(
             VisitAttachmentSerializer(att, context={"request": request}).data
         )

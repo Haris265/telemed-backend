@@ -69,6 +69,12 @@ class DoctorProfile(models.Model):
         default=15,
         help_text="Consultation session length in minutes",
     )
+    consultation_fee = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        help_text="Expected consultation fee (PKR) for WhatsApp bank-transfer bookings.",
+    )
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -103,6 +109,30 @@ class DoctorProfile(models.Model):
         if self.subscriptions.exists():
             return "expired"
         return "none"
+
+
+class DoctorBankAccount(models.Model):
+    """Bank account a doctor shares with patients for transfer payments."""
+
+    doctor = models.ForeignKey(
+        DoctorProfile,
+        on_delete=models.CASCADE,
+        related_name="bank_accounts",
+    )
+    bank_name = models.CharField(max_length=120)
+    account_title = models.CharField(max_length=200)
+    account_number = models.CharField(max_length=64)
+    iban = models.CharField(max_length=64, blank=True, default="")
+    is_primary = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-is_primary", "-created_at", "-id"]
+
+    def __str__(self):
+        return f"{self.bank_name} {self.account_number} ({self.doctor})"
 
 
 class DoctorSubscription(models.Model):

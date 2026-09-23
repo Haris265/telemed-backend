@@ -13,6 +13,22 @@ class Appointment(models.Model):
         CANCELLED = "cancelled", "Cancelled"
         REJECTED = "rejected", "Rejected"
 
+    class PaymentMethod(models.TextChoices):
+        BANK_TRANSFER = "bank_transfer", "Bank Transfer"
+        CASH_AT_CLINIC = "cash_at_clinic", "Cash at Clinic"
+
+    class PaymentStatus(models.TextChoices):
+        PENDING = "pending", "Pending"
+        PAID = "paid", "Paid"
+        FAILED = "failed", "Failed"
+        NOT_REQUIRED = "not_required", "Not Required"
+
+    class PaymentOcrStatus(models.TextChoices):
+        PENDING = "pending", "Pending"
+        PASSED = "passed", "Passed"
+        FAILED = "failed", "Failed"
+        SKIPPED = "skipped", "Skipped"
+
     patient = models.ForeignKey(
         PatientProfile,
         on_delete=models.CASCADE,
@@ -40,6 +56,42 @@ class Appointment(models.Model):
     )
     notes = models.TextField(blank=True, default="")
     rejection_reason = models.TextField(blank=True, default="")
+    payment_method = models.CharField(
+        max_length=20,
+        choices=PaymentMethod.choices,
+        blank=True,
+        default="",
+    )
+    payment_status = models.CharField(
+        max_length=20,
+        choices=PaymentStatus.choices,
+        default=PaymentStatus.NOT_REQUIRED,
+    )
+    payment_amount_expected = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+    payment_amount_received = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+    payment_reference = models.CharField(max_length=120, blank=True, default="")
+    payment_slip = models.ImageField(
+        upload_to="payment_slips/",
+        blank=True,
+        null=True,
+    )
+    payment_ocr_raw = models.JSONField(default=dict, blank=True)
+    payment_ocr_status = models.CharField(
+        max_length=16,
+        choices=PaymentOcrStatus.choices,
+        default=PaymentOcrStatus.SKIPPED,
+    )
+    payment_verified_at = models.DateTimeField(null=True, blank=True)
     visit_started_at = models.DateTimeField(null=True, blank=True)
     visit_ended_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -161,6 +213,8 @@ class VisitAttachment(models.Model):
         default=SummaryStatus.SKIPPED,
     )
     summary_error = models.CharField(max_length=500, blank=True, default="")
+    follow_up_at = models.DateTimeField(null=True, blank=True)
+    follow_up_reminder_sent_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

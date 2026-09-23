@@ -84,6 +84,8 @@ class VisitAttachmentSerializer(serializers.ModelSerializer):
             "summary_text",
             "summary_status",
             "summary_error",
+            "follow_up_at",
+            "follow_up_reminder_sent_at",
             "created_at",
         )
         read_only_fields = fields
@@ -148,6 +150,14 @@ class AppointmentSerializer(serializers.ModelSerializer):
             "status",
             "notes",
             "rejection_reason",
+            "payment_method",
+            "payment_status",
+            "payment_amount_expected",
+            "payment_amount_received",
+            "payment_reference",
+            "payment_slip",
+            "payment_ocr_status",
+            "payment_verified_at",
             "visit_started_at",
             "visit_ended_at",
             "visit_duration_seconds",
@@ -161,6 +171,14 @@ class AppointmentSerializer(serializers.ModelSerializer):
             "token_date",
             "token_number",
             "token_code",
+            "payment_method",
+            "payment_status",
+            "payment_amount_expected",
+            "payment_amount_received",
+            "payment_reference",
+            "payment_slip",
+            "payment_ocr_status",
+            "payment_verified_at",
             "visit_started_at",
             "visit_ended_at",
             "visit_duration_seconds",
@@ -185,12 +203,14 @@ class AppointmentDetailSerializer(AppointmentSerializer):
     clinical_note = serializers.SerializerMethodField()
     prescription = serializers.SerializerMethodField()
     attachments = VisitAttachmentSerializer(many=True, read_only=True)
+    payment_ocr_raw = serializers.JSONField(read_only=True)
 
     class Meta(AppointmentSerializer.Meta):
         fields = AppointmentSerializer.Meta.fields + (
             "clinical_note",
             "prescription",
             "attachments",
+            "payment_ocr_raw",
         )
 
     def get_clinical_note(self, obj):

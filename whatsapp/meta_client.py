@@ -232,3 +232,44 @@ class MetaWhatsAppClient:
         except Exception:
             logger.exception("Failed to send WhatsApp media message to %s", to)
             return {"error": True, "to": to}
+
+    def download_media(self, media_id: str) -> tuple[bytes, str] | None:
+        """Download inbound media by Meta media id. Returns (bytes, mime_type)."""
+        media_id = (media_id or "").strip()
+        if not media_id:
+            return None
+        if not self.token:
+            logger.warning("Meta WA token missing; cannot download media %s", media_id)
+            return None
+        headers = {"Authorization": f"Bearer {self.token}"}
+        try:
+            meta = requests.get(
+                f"{self.graph_base}/{media_id}",
+                headers=headers,
+                timeout=30,
+            )
+            if not meta.ok:
+                logger.error(
+                    "Meta WA media meta failed (%s): %s",
+                    meta.status_code,
+                    meta.text[:500],
+                )
+                return None
+            body = meta.json() or {}
+            url = (body.get("url") or "").strip()
+            mime = (body.get("mime_type") or "application/octet-stream").strip()
+            if not url:
+                logger.error("Meta WA media meta missing url for %s", media_id)
+                return None
+            file_resp = requests.get(url, headers=headers, timeout=60)
+            if not file_resp.ok:
+                logger.error(
+                    "Meta WA media download failed (%s): %s",
+                    file_resp.status_code,
+                    file_resp.text[:300],
+                )
+                return None
+            return file_resp.content, mime
+        except Exception:
+            logger.exception("Failed downloading WhatsApp media %s", media_id)
+            return None

@@ -3,8 +3,11 @@ import random
 import re
 import string
 from datetime import date, time
+from decimal import Decimal
 
 from django.core.cache import cache
+from django.core.files.base import ContentFile
+from django.utils import timezone
 
 from appointments.models import Appointment
 from appointments.services import (
@@ -15,6 +18,7 @@ from appointments.services import (
     pakistan_today,
     upcoming_available_dates,
 )
+from appointments.slip_ocr import verify_payment_slip
 from catalog.models import Clinic, DoctorAvailability, DoctorProfile, Speciality
 from patients.models import PatientProfile
 
@@ -31,6 +35,8 @@ MENU_TEXT = (
 )
 
 CANCEL_CHOICES = ("0", "cancel", "menu")
+BANK_CHOICES = ("1", "bank", "transfer", "bank transfer", "bank_transfer")
+CASH_CHOICES = ("2", "cash", "clinic", "cash at clinic", "cash_at_clinic")
 MARKETPLACE_STATES = {
     WhatsAppSession.State.AWAITING_SPECIALITY,
     WhatsAppSession.State.AWAITING_DOCTOR,
@@ -69,7 +75,16 @@ def _message_text(msg: dict) -> str:
             return ((interactive.get("button_reply") or {}).get("title") or "").strip()
         if interactive.get("type") == "list_reply":
             return ((interactive.get("list_reply") or {}).get("title") or "").strip()
+    # Caption on image can carry text commands (e.g. cash / cancel)
+    if msg.get("type") == "image":
+        return ((msg.get("image") or {}).get("caption") or "").strip()
     return ""
+
+
+def _message_image_id(msg: dict) -> str:
+    if msg.get("type") != "image":
+        return ""
+    return str((msg.get("image") or {}).get("id") or "").strip()
 
 
 def _generate_otp() -> str:
@@ -508,6 +523,289 @@ def _prompt_confirm(
     )
 
 
+def _load_booking_context(
+    session: WhatsAppSession,
+) -> tuple[DoctorProfile | None, Clinic | None, date | None, time | None]:
+    doctor_id = session.context.get("doctor_id")
+    clinic_id = session.context.get("clinic_id")
+    token_date_raw = session.context.get("token_date")
+    slot_raw = session.context.get("slot_time")
+    doctor = DoctorProfile.objects.filter(id=doctor_id, is_active=True).first()
+    clinic = Clinic.objects.filter(id=clinic_id, is_active=True).first()
+    token_date = None
+    slot_time = None
+    if token_date_raw:
+        try:
+            token_date = date.fromisoformat(str(token_date_raw))
+        except ValueError:
+            token_date = None
+    if slot_raw:
+        try:
+            slot_parts = [int(x) for x in str(slot_raw).split(":")[:3]]
+            slot_time = time(*slot_parts)
+        except (TypeError, ValueError):
+            slot_time = None
+    return doctor, clinic, token_date, slot_time
+
+
+def _prompt_payment_method(session: WhatsAppSession, client, phone: str) -> None:
+    doctor, clinic, token_date, slot_time = _load_booking_context(session)
+    if not doctor or not clinic or not token_date or not slot_time:
+        _reset_to_menu(session)
+        client.send_text(phone, "Session expired. Please book again.\n\n" + _menu_text(session))
+        return
+    fee = doctor.consultation_fee or Decimal("0")
+    session.state = WhatsAppSession.State.AWAITING_PAYMENT_METHOD
+    session.save(update_fields=["state", "updated_at"])
+    client.send_text(
+        phone,
+        "Choose payment method:\n"
+        f"Fee: Rs {fee}\n\n"
+        "1. Bank transfer (send payment slip on WhatsApp)\n"
+        "2. Cash at clinic\n\n"
+        "Reply 1 or 2.\n"
+        "Reply 0 to cancel.",
+    )
+
+
+def _format_bank_accounts(doctor: DoctorProfile) -> str:
+    accounts = list(
+        doctor.bank_accounts.filter(is_active=True).order_by("-is_primary", "-created_at")
+    )
+    if not accounts:
+        return ""
+    lines: list[str] = []
+    for i, acc in enumerate(accounts, start=1):
+        primary = " (primary)" if acc.is_primary else ""
+        block = (
+            f"{i}. {acc.bank_name}{primary}\n"
+            f"   Title: {acc.account_title}\n"
+            f"   Account: {acc.account_number}"
+        )
+        if acc.iban:
+            block += f"\n   IBAN: {acc.iban}"
+        lines.append(block)
+    return "\n".join(lines)
+
+
+def _prompt_bank_transfer(
+    session: WhatsAppSession, client, phone: str, doctor: DoctorProfile
+) -> None:
+    fee = doctor.consultation_fee or Decimal("0")
+    if fee <= 0:
+        client.send_text(
+            phone,
+            "This doctor has not set a consultation fee yet.\n"
+            "Please choose Cash at clinic (reply 2) or cancel (0).",
+        )
+        return
+    banks = _format_bank_accounts(doctor)
+    if not banks:
+        client.send_text(
+            phone,
+            "This doctor has no bank account on profile yet.\n"
+            "Please choose Cash at clinic (reply 2) or cancel (0).",
+        )
+        return
+    session.state = WhatsAppSession.State.AWAITING_PAYMENT_SLIP
+    session.save(update_fields=["state", "updated_at"])
+    client.send_text(
+        phone,
+        "Bank transfer payment:\n"
+        f"Amount to transfer: Rs {fee}\n\n"
+        f"{banks}\n\n"
+        "Transfer the exact amount, then send a clear photo of the payment slip here.\n"
+        "Reply 2 for Cash at clinic instead.\n"
+        "Reply 0 to cancel.",
+    )
+
+
+def _complete_booking_message(
+    *,
+    doctor: DoctorProfile,
+    clinic: Clinic,
+    appt: Appointment,
+    slot_label: str,
+    payment_note: str,
+) -> str:
+    when = appt.token_date.strftime("%d %b %Y")
+    return (
+        "Booked!\n"
+        f"Doctor: Dr. {doctor.full_name}\n"
+        f"Clinic: {clinic.name}\n"
+        f"Date: {when}\n"
+        f"Time: {slot_label} (Pakistan)\n"
+        f"Your token: {appt.token_code}\n"
+        f"{payment_note}\n\n"
+        "Show this token at the clinic."
+    )
+
+
+def _book_cash_appointment(
+    session: WhatsAppSession,
+    client,
+    phone: str,
+    patient: PatientProfile,
+) -> None:
+    doctor, clinic, token_date, slot_time = _load_booking_context(session)
+    if not doctor or not clinic or not token_date or not slot_time:
+        _reset_to_menu(session)
+        client.send_text(phone, "Session expired. Please book again.\n\n" + _menu_text(session))
+        return
+    bound = _bound_doctor(session)
+    if bound and doctor.id != bound.id:
+        _reset_to_menu(session)
+        client.send_text(
+            phone,
+            f"This WhatsApp only books with Dr. {bound.full_name}.\n\n"
+            + _menu_text(session),
+        )
+        return
+    fee = doctor.consultation_fee or Decimal("0")
+    try:
+        appt = book_token(
+            patient,
+            doctor,
+            token_date,
+            slot_time,
+            slot_time=slot_time,
+            clinic=clinic,
+            notes="Booked via WhatsApp",
+            payment_method=Appointment.PaymentMethod.CASH_AT_CLINIC,
+            payment_status=Appointment.PaymentStatus.PENDING,
+            payment_amount_expected=fee if fee > 0 else None,
+            payment_ocr_status=Appointment.PaymentOcrStatus.SKIPPED,
+        )
+    except ValueError as exc:
+        _reset_to_menu(session)
+        client.send_text(phone, f"{exc}\n\n{_menu_text(session)}")
+        return
+    except Exception:
+        logger.exception("Cash booking failed for %s / doctor %s", phone, doctor.id)
+        _reset_to_menu(session)
+        client.send_text(
+            phone, "Booking failed. Please try again.\n\n" + _menu_text(session)
+        )
+        return
+
+    slot_label = session.context.get("slot_label") or format_clock(slot_time)
+    _reset_to_menu(session)
+    client.send_text(
+        phone,
+        _complete_booking_message(
+            doctor=doctor,
+            clinic=clinic,
+            appt=appt,
+            slot_label=slot_label,
+            payment_note="Payment: Cash at clinic (pending)",
+        )
+        + f"\n\n{_menu_text(session)}",
+    )
+
+
+def _book_bank_after_ocr(
+    session: WhatsAppSession,
+    client,
+    phone: str,
+    patient: PatientProfile,
+    *,
+    image_bytes: bytes,
+    mime_type: str,
+) -> None:
+    doctor, clinic, token_date, slot_time = _load_booking_context(session)
+    if not doctor or not clinic or not token_date or not slot_time:
+        _reset_to_menu(session)
+        client.send_text(phone, "Session expired. Please book again.\n\n" + _menu_text(session))
+        return
+    bound = _bound_doctor(session)
+    if bound and doctor.id != bound.id:
+        _reset_to_menu(session)
+        client.send_text(
+            phone,
+            f"This WhatsApp only books with Dr. {bound.full_name}.\n\n"
+            + _menu_text(session),
+        )
+        return
+
+    fee = doctor.consultation_fee or Decimal("0")
+    if fee <= 0:
+        client.send_text(
+            phone,
+            "Consultation fee is not set. Reply 2 for Cash at clinic, or 0 to cancel.",
+        )
+        return
+
+    client.send_text(phone, "Checking your payment slip…")
+    result = verify_payment_slip(
+        image_bytes=image_bytes,
+        mime_type=mime_type or "image/jpeg",
+        expected_amount=fee,
+        expected_date=token_date,
+    )
+    if not result.ok:
+        client.send_text(
+            phone,
+            "Payment slip could not be verified.\n"
+            f"{result.error or 'Please send a clearer slip photo.'}\n\n"
+            "Send the slip image again, reply 2 for Cash at clinic, or 0 to cancel.",
+        )
+        return
+
+    try:
+        appt = book_token(
+            patient,
+            doctor,
+            token_date,
+            slot_time,
+            slot_time=slot_time,
+            clinic=clinic,
+            notes="Booked via WhatsApp",
+            payment_method=Appointment.PaymentMethod.BANK_TRANSFER,
+            payment_status=Appointment.PaymentStatus.PAID,
+            payment_amount_expected=fee,
+            payment_amount_received=result.amount,
+            payment_reference=result.reference,
+            payment_ocr_raw=result.raw,
+            payment_ocr_status=Appointment.PaymentOcrStatus.PASSED,
+            payment_verified_at=timezone.now(),
+        )
+    except ValueError as exc:
+        _reset_to_menu(session)
+        client.send_text(phone, f"{exc}\n\n{_menu_text(session)}")
+        return
+    except Exception:
+        logger.exception("Bank booking failed for %s / doctor %s", phone, doctor.id)
+        _reset_to_menu(session)
+        client.send_text(
+            phone, "Booking failed. Please try again.\n\n" + _menu_text(session)
+        )
+        return
+
+    ext = ".jpg"
+    if "png" in (mime_type or "").lower():
+        ext = ".png"
+    elif "webp" in (mime_type or "").lower():
+        ext = ".webp"
+    filename = f"slip_{appt.id}_{result.reference[:32] or 'payment'}{ext}"
+    appt.payment_slip.save(filename, ContentFile(image_bytes), save=True)
+
+    slot_label = session.context.get("slot_label") or format_clock(slot_time)
+    _reset_to_menu(session)
+    client.send_text(
+        phone,
+        _complete_booking_message(
+            doctor=doctor,
+            clinic=clinic,
+            appt=appt,
+            slot_label=slot_label,
+            payment_note=(
+                f"Payment: Bank transfer confirmed (ref {result.reference})"
+            ),
+        )
+        + f"\n\n{_menu_text(session)}",
+    )
+
+
 def _resolve_speciality_choice(text: str, ordered: list[Speciality]) -> Speciality | None:
     idx = _parse_choice_index(text, len(ordered))
     if idx is not None:
@@ -578,7 +876,9 @@ def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = Non
         session.save(update_fields=["context", "updated_at"])
 
     text = _message_text(msg)
-    if not text:
+    image_id = _message_image_id(msg)
+    awaiting_slip = session.state == WhatsAppSession.State.AWAITING_PAYMENT_SLIP
+    if not text and not (awaiting_slip and image_id):
         return
 
     patient = PatientProfile.objects.filter(phone=phone).first()
@@ -592,6 +892,12 @@ def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = Non
             patient.save(update_fields=["name", "updated_at"])
 
     if not patient:
+        if awaiting_slip and image_id:
+            client.send_text(
+                phone,
+                "Please create your PatientCare profile first (send your full name).",
+            )
+            return
         if session.state == WhatsAppSession.State.AWAITING_NAME:
             name = _clean_patient_name(text)
             if not name:
@@ -842,18 +1148,12 @@ def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = Non
                 )
             return
 
-        doctor_id = session.context.get("doctor_id")
-        clinic_id = session.context.get("clinic_id")
-        token_date_raw = session.context.get("token_date")
-        slot_raw = session.context.get("slot_time")
-        doctor = DoctorProfile.objects.filter(id=doctor_id, is_active=True).first()
-        clinic = Clinic.objects.filter(id=clinic_id, is_active=True).first()
-        if not doctor or not clinic or not token_date_raw or not slot_raw:
+        doctor, clinic, token_date, slot_time = _load_booking_context(session)
+        if not doctor or not clinic or not token_date or not slot_time:
             _reset_to_menu(session)
             client.send_text(phone, "Doctor unavailable.\n\n" + _menu_text(session))
             return
 
-        # Linked number: only allow booking the bound doctor.
         bound = _bound_doctor(session)
         if bound and doctor.id != bound.id:
             _reset_to_menu(session)
@@ -864,45 +1164,66 @@ def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = Non
             )
             return
 
-        token_date = date.fromisoformat(token_date_raw)
-        slot_parts = [int(x) for x in slot_raw.split(":")[:3]]
-        slot_time = time(*slot_parts)
+        _prompt_payment_method(session, client, phone)
+        return
 
-        try:
-            appt = book_token(
-                patient,
-                doctor,
-                token_date,
-                slot_time,
-                slot_time=slot_time,
-                clinic=clinic,
-                notes="Booked via WhatsApp",
-            )
-        except ValueError as exc:
+    if session.state == WhatsAppSession.State.AWAITING_PAYMENT_METHOD:
+        if choice in CANCEL_CHOICES:
             _reset_to_menu(session)
-            client.send_text(phone, f"{exc}\n\n{_menu_text(session)}")
+            client.send_text(phone, _menu_text(session))
             return
-        except Exception:
-            logger.exception("Booking failed for %s / doctor %s", phone, doctor.id)
-            _reset_to_menu(session)
-            client.send_text(
-                phone, "Booking failed. Please try again.\n\n" + _menu_text(session)
-            )
+        if choice in CASH_CHOICES:
+            _book_cash_appointment(session, client, phone, patient)
             return
-
-        when = appt.token_date.strftime("%d %b %Y")
-        slot_label = session.context.get("slot_label") or format_clock(slot_time)
-        _reset_to_menu(session)
+        if choice in BANK_CHOICES:
+            doctor, _, _, _ = _load_booking_context(session)
+            if not doctor:
+                _reset_to_menu(session)
+                client.send_text(
+                    phone, "Session expired. Please book again.\n\n" + _menu_text(session)
+                )
+                return
+            _prompt_bank_transfer(session, client, phone, doctor)
+            return
         client.send_text(
             phone,
-            "Booked!\n"
-            f"Doctor: Dr. {doctor.full_name}\n"
-            f"Clinic: {clinic.name}\n"
-            f"Date: {when}\n"
-            f"Time: {slot_label} (Pakistan)\n"
-            f"Your token: {appt.token_code}\n\n"
-            "Show this token at the clinic.\n\n"
-            f"{_menu_text(session)}",
+            "Reply 1 for Bank transfer, 2 for Cash at clinic, or 0 to cancel.",
+        )
+        return
+
+    if session.state == WhatsAppSession.State.AWAITING_PAYMENT_SLIP:
+        if choice in CANCEL_CHOICES:
+            _reset_to_menu(session)
+            client.send_text(phone, _menu_text(session))
+            return
+        if choice in CASH_CHOICES:
+            _book_cash_appointment(session, client, phone, patient)
+            return
+        if image_id:
+            downloaded = None
+            if hasattr(client, "download_media"):
+                downloaded = client.download_media(image_id)
+            if not downloaded:
+                client.send_text(
+                    phone,
+                    "Could not download your slip image. Please send it again, "
+                    "or reply 2 for Cash at clinic.",
+                )
+                return
+            image_bytes, mime_type = downloaded
+            _book_bank_after_ocr(
+                session,
+                client,
+                phone,
+                patient,
+                image_bytes=image_bytes,
+                mime_type=mime_type,
+            )
+            return
+        client.send_text(
+            phone,
+            "Please send a photo of your payment slip, reply 2 for Cash at clinic, "
+            "or 0 to cancel.",
         )
         return
 

@@ -8,6 +8,7 @@ from rest_framework import serializers
 from .models import (
     Clinic,
     DoctorAvailability,
+    DoctorBankAccount,
     DoctorClinic,
     DoctorProfile,
     DoctorSubscription,
@@ -108,6 +109,61 @@ class DoctorOnboardingSerializer(serializers.Serializer):
         return doctor
 
 
+class DoctorBankAccountSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DoctorBankAccount
+        fields = (
+            "id",
+            "bank_name",
+            "account_title",
+            "account_number",
+            "iban",
+            "is_primary",
+            "is_active",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("id", "created_at", "updated_at")
+
+    def validate_bank_name(self, value):
+        value = (value or "").strip()
+        if not value:
+            raise serializers.ValidationError("This field may not be blank.")
+        return value
+
+    def validate_account_title(self, value):
+        value = (value or "").strip()
+        if not value:
+            raise serializers.ValidationError("This field may not be blank.")
+        return value
+
+    def validate_account_number(self, value):
+        value = (value or "").strip()
+        if not value:
+            raise serializers.ValidationError("This field may not be blank.")
+        return value
+
+    def validate_iban(self, value):
+        return (value or "").strip().upper()
+
+    def create(self, validated_data):
+        doctor = self.context["doctor"]
+        is_primary = validated_data.get("is_primary", False)
+        if is_primary or not doctor.bank_accounts.filter(is_active=True).exists():
+            validated_data["is_primary"] = True
+            doctor.bank_accounts.filter(is_primary=True).update(is_primary=False)
+        account = DoctorBankAccount.objects.create(doctor=doctor, **validated_data)
+        return account
+
+    def update(self, instance, validated_data):
+        is_primary = validated_data.get("is_primary")
+        if is_primary:
+            instance.doctor.bank_accounts.exclude(pk=instance.pk).filter(
+                is_primary=True
+            ).update(is_primary=False)
+        return super().update(instance, validated_data)
+
+
 class DoctorProfileSerializer(serializers.ModelSerializer):
     email = serializers.EmailField(source="user.email", read_only=True)
     specialities = SpecialitySerializer(many=True, read_only=True)
@@ -125,6 +181,7 @@ class DoctorProfileSerializer(serializers.ModelSerializer):
     full_name = serializers.CharField(read_only=True)
     has_active_subscription = serializers.SerializerMethodField()
     subscription_status = serializers.CharField(read_only=True)
+    bank_accounts = DoctorBankAccountSerializer(many=True, read_only=True)
 
     class Meta:
         model = DoctorProfile
@@ -140,6 +197,8 @@ class DoctorProfileSerializer(serializers.ModelSerializer):
             "clinic",
             "clinic_name",
             "session_time",
+            "consultation_fee",
+            "bank_accounts",
             "is_active",
             "has_active_subscription",
             "subscription_status",
@@ -173,11 +232,16 @@ class DoctorMeUpdateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = DoctorProfile
-        fields = ("first_name", "last_name", "email", "session_time")
+        fields = ("first_name", "last_name", "email", "session_time", "consultation_fee")
 
     def validate_session_time(self, value):
         if value < 1:
             raise serializers.ValidationError("session_time must be at least 1 minute.")
+        return value
+
+    def validate_consultation_fee(self, value):
+        if value is not None and value < 0:
+            raise serializers.ValidationError("consultation_fee cannot be negative.")
         return value
 
     def validate_first_name(self, value):

@@ -206,6 +206,14 @@ def book_token(
     slot_time: time | None = None,
     clinic: Clinic | None = None,
     notes: str = "Booked via WhatsApp",
+    payment_method: str = "",
+    payment_status: str = "",
+    payment_amount_expected=None,
+    payment_amount_received=None,
+    payment_reference: str = "",
+    payment_ocr_raw: dict | None = None,
+    payment_ocr_status: str = "",
+    payment_verified_at=None,
 ) -> Appointment:
     with transaction.atomic():
         existing = (
@@ -257,16 +265,40 @@ def book_token(
                 minutes=doctor.session_time * (next_token - 1)
             )
 
-        return Appointment.objects.create(
-            patient=patient,
-            doctor=doctor,
-            clinic=clinic,
-            scheduled_at=scheduled_at,
-            token_date=token_date,
-            token_number=next_token,
-            status=Appointment.Status.UPCOMING,
-            notes=notes,
-        )
+        create_kwargs: dict = {
+            "patient": patient,
+            "doctor": doctor,
+            "clinic": clinic,
+            "scheduled_at": scheduled_at,
+            "token_date": token_date,
+            "token_number": next_token,
+            "status": Appointment.Status.UPCOMING,
+            "notes": notes,
+        }
+        if payment_method:
+            create_kwargs["payment_method"] = payment_method
+        if payment_status:
+            create_kwargs["payment_status"] = payment_status
+        elif payment_method == Appointment.PaymentMethod.CASH_AT_CLINIC:
+            create_kwargs["payment_status"] = Appointment.PaymentStatus.PENDING
+        elif payment_method == Appointment.PaymentMethod.BANK_TRANSFER:
+            create_kwargs["payment_status"] = Appointment.PaymentStatus.PAID
+        if payment_amount_expected is not None:
+            create_kwargs["payment_amount_expected"] = payment_amount_expected
+        if payment_amount_received is not None:
+            create_kwargs["payment_amount_received"] = payment_amount_received
+        if payment_reference:
+            create_kwargs["payment_reference"] = payment_reference
+        if payment_ocr_raw is not None:
+            create_kwargs["payment_ocr_raw"] = payment_ocr_raw
+        if payment_ocr_status:
+            create_kwargs["payment_ocr_status"] = payment_ocr_status
+        elif payment_method == Appointment.PaymentMethod.CASH_AT_CLINIC:
+            create_kwargs["payment_ocr_status"] = Appointment.PaymentOcrStatus.SKIPPED
+        if payment_verified_at is not None:
+            create_kwargs["payment_verified_at"] = payment_verified_at
+
+        return Appointment.objects.create(**create_kwargs)
 
 
 def queue_info(appointment: Appointment) -> dict:

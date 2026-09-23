@@ -14,6 +14,24 @@ services:
     expose:
       - "8000"
 
+  reminders:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: sqlite
+      USE_REDIS: "0"
+      TZ: Asia/Karachi
+    volumes:
+      - telemed_sqlite_data:/app/data
+      - telemed_media_data:/app/media
+      - telemed_static_data:/app/staticfiles
+      - ./docker/reminder-loop.sh:/app/docker/reminder-loop.sh:ro
+    entrypoint: ["/bin/sh", "/app/docker/reminder-loop.sh"]
+    depends_on:
+      - backend
+
   nginx:
     image: nginx:alpine
     restart: unless-stopped

@@ -15,11 +15,13 @@ class WhatsAppSession(models.Model):
         AWAITING_DATE = "awaiting_date", "Awaiting Date"
         AWAITING_SLOT = "awaiting_slot", "Awaiting Slot"
         AWAITING_CONFIRM = "awaiting_confirm", "Awaiting Confirm"
+        AWAITING_PAYMENT_METHOD = "awaiting_payment_method", "Awaiting Payment Method"
+        AWAITING_PAYMENT_SLIP = "awaiting_payment_slip", "Awaiting Payment Slip"
         MENU = "menu", "Menu"
 
     phone = models.CharField(max_length=20, unique=True, db_index=True)
     state = models.CharField(
-        max_length=32,
+        max_length=40,
         choices=State.choices,
         default=State.IDLE,
     )

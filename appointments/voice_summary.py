@@ -8,13 +8,18 @@ import logging
 import os
 import re
 import time
+from datetime import datetime
 from pathlib import Path
+from typing import Any
+from zoneinfo import ZoneInfo
 
 import requests
 from django.conf import settings
+from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
+PK_TZ = ZoneInfo("Asia/Karachi")
 
 PROMPT = """You are a medical scribe for a Pakistani telemedicine clinic.
 Listen to this doctor visit voice note.
@@ -22,7 +27,8 @@ Listen to this doctor visit voice note.
 Return ONLY valid JSON (no markdown fences) with exactly these keys:
 {
   "transcript": "full speech-to-text of the audio (Urdu/English as spoken)",
-  "summary": "concise clinical visit summary in Roman Urdu (Urdu written only in Latin/English letters — no Arabic or Devanagari script)"
+  "summary": "concise clinical visit summary in Roman Urdu (Urdu written only in Latin/English letters — no Arabic or Devanagari script)",
+  "next_visit_at": "YYYY-MM-DDTHH:MM or null"
 }
 
 Summary rules:
@@ -31,6 +37,16 @@ Summary rules:
 - Do not invent details that are not in the audio.
 - If audio is empty or unusable, set transcript to "" and summary to:
   "Voice note se clear summary nahi ban saki."
+- If the doctor mentions a next / follow-up visit date (and optional time), set next_visit_at
+  as local Pakistan time in format YYYY-MM-DDTHH:MM (use 10:00 if only a date is given).
+- If no next visit is mentioned, set next_visit_at to null.
+"""
+
+FOLLOW_UP_EXTRACT_PROMPT = """From this Roman Urdu clinical visit summary, extract the next/follow-up visit datetime.
+Return ONLY JSON: {"next_visit_at": "YYYY-MM-DDTHH:MM" or null}
+Use Asia/Karachi local time. If only a date is mentioned, use 10:00.
+If no follow-up visit is mentioned, return null.
+Summary:
 """
 
 MIME_BY_EXT = {
@@ -99,10 +115,41 @@ def _fail(attachment, message: str) -> None:
     )
 
 
-def _parse_gemini_json(text: str) -> tuple[str, str]:
+def _parse_next_visit_at(raw: Any):
+    """Parse Gemini next_visit_at into timezone-aware datetime, or None."""
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        return None
+    text = str(raw).strip()
+    if not text or text.lower() in ("null", "none", "n/a", "-"):
+        return None
+
+    text = text.replace("Z", "").replace("z", "").strip()
+    candidates: list[tuple[str, str]] = []
+    if "T" in text or " " in text:
+        candidates.append((text[:19], "%Y-%m-%dT%H:%M:%S"))
+        candidates.append((text[:16].replace(" ", "T"), "%Y-%m-%dT%H:%M"))
+        candidates.append((text[:19].replace("T", " "), "%Y-%m-%d %H:%M:%S"))
+        candidates.append((text[:16].replace("T", " "), "%Y-%m-%d %H:%M"))
+    candidates.append((text[:10], "%Y-%m-%d"))
+
+    for value, fmt in candidates:
+        try:
+            dt = datetime.strptime(value, fmt)
+            if fmt == "%Y-%m-%d":
+                dt = dt.replace(hour=10, minute=0)
+            return timezone.make_aware(dt, PK_TZ)
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_gemini_payload(text: str) -> tuple[str, str, Any]:
+    """Returns transcript, summary, next_visit_at raw."""
     raw = (text or "").strip()
     if not raw:
-        return "", "Voice note se clear summary nahi ban saki."
+        return "", "Voice note se clear summary nahi ban saki.", None
 
     fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw)
     if fence:
@@ -112,44 +159,36 @@ def _parse_gemini_json(text: str) -> tuple[str, str]:
         data = json.loads(raw)
         transcript = str(data.get("transcript") or "").strip()
         summary = str(data.get("summary") or "").strip()
+        next_visit = data.get("next_visit_at")
         if summary:
-            return transcript, summary
+            return transcript, summary, next_visit
     except json.JSONDecodeError:
         pass
 
-    return "", raw
+    return "", raw, None
 
 
-def _call_gemini(
+def _apply_follow_up(attachment, follow_up_at) -> None:
+    """Set follow_up_at; clear reminder flag if datetime changed."""
+    prev = attachment.follow_up_at
+    attachment.follow_up_at = follow_up_at
+    if prev != follow_up_at:
+        attachment.follow_up_reminder_sent_at = None
+
+
+def _gemini_generate_content(
     *,
     api_key: str,
     model: str,
-    mime: str,
-    audio_b64: str,
+    parts: list[dict],
+    timeout: int = 120,
 ) -> tuple[str | None, str | None]:
-    """
-    Returns (text, error).
-    text set on success; error set on hard failure for this model.
-    Raises requests.Timeout / RequestException for network issues.
-    """
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
         f"{model}:generateContent"
     )
     payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": PROMPT},
-                    {
-                        "inline_data": {
-                            "mime_type": mime,
-                            "data": audio_b64,
-                        }
-                    },
-                ]
-            }
-        ],
+        "contents": [{"parts": parts}],
         "generationConfig": {
             "temperature": 0.3,
             "responseMimeType": "application/json",
@@ -163,7 +202,7 @@ def _call_gemini(
             params={"key": api_key},
             headers={"Content-Type": "application/json"},
             json=payload,
-            timeout=120,
+            timeout=timeout,
         )
         if res.status_code in RETRYABLE_STATUS:
             last_error = f"Gemini failed ({res.status_code}): {res.text[:200]}"
@@ -182,18 +221,82 @@ def _call_gemini(
             return None, f"Gemini failed ({res.status_code}): {res.text[:200]}"
 
         body = res.json()
-        parts = (
+        response_parts = (
             body.get("candidates", [{}])[0]
             .get("content", {})
             .get("parts", [])
         )
-        text = "".join(str(p.get("text") or "") for p in parts).strip()
+        text = "".join(str(p.get("text") or "") for p in response_parts).strip()
         if not text:
             block = body.get("promptFeedback") or body.get("error") or body
             return None, f"Gemini returned empty content: {str(block)[:200]}"
         return text, None
 
     return None, last_error or f"Gemini model {model} unavailable (503/429)."
+
+
+def _call_gemini(
+    *,
+    api_key: str,
+    model: str,
+    mime: str,
+    audio_b64: str,
+) -> tuple[str | None, str | None]:
+    return _gemini_generate_content(
+        api_key=api_key,
+        model=model,
+        parts=[
+            {"text": PROMPT},
+            {
+                "inline_data": {
+                    "mime_type": mime,
+                    "data": audio_b64,
+                }
+            },
+        ],
+    )
+
+
+def extract_follow_up_from_summary_text(summary: str):
+    """Text-only Gemini extract of next_visit_at from edited summary. Returns aware dt or None."""
+    api_key = _gemini_key()
+    if not api_key or not (summary or "").strip():
+        return None
+
+    parts = [{"text": FOLLOW_UP_EXTRACT_PROMPT + summary.strip()}]
+    last_error = None
+    for model in _model_chain():
+        text, err = _gemini_generate_content(
+            api_key=api_key,
+            model=model,
+            parts=parts,
+            timeout=60,
+        )
+        if err:
+            last_error = err
+            logger.warning("Follow-up extract via %s failed: %s", model, err)
+            continue
+        raw = (text or "").strip()
+        fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw)
+        if fence:
+            raw = fence.group(1).strip()
+        try:
+            data = json.loads(raw)
+            return _parse_next_visit_at(data.get("next_visit_at"))
+        except json.JSONDecodeError:
+            return _parse_next_visit_at(raw)
+    if last_error:
+        logger.warning("Follow-up extract failed: %s", last_error)
+    return None
+
+
+def apply_follow_up_from_summary(attachment) -> None:
+    """Re-extract follow_up_at from attachment.summary_text and save."""
+    follow_up = extract_follow_up_from_summary_text(attachment.summary_text or "")
+    _apply_follow_up(attachment, follow_up)
+    attachment.save(
+        update_fields=["follow_up_at", "follow_up_reminder_sent_at"]
+    )
 
 
 def generate_voice_summary(attachment_id: int) -> None:
@@ -255,17 +358,21 @@ def generate_voice_summary(attachment_id: int) -> None:
                 )
                 continue
 
-            transcript, summary = _parse_gemini_json(text or "")
+            transcript, summary, next_raw = _parse_gemini_payload(text or "")
+            follow_up = _parse_next_visit_at(next_raw)
             att.transcript_text = transcript
             att.summary_text = summary
             att.summary_status = VisitAttachment.SummaryStatus.READY
             att.summary_error = ""
+            _apply_follow_up(att, follow_up)
             att.save(
                 update_fields=[
                     "transcript_text",
                     "summary_text",
                     "summary_status",
                     "summary_error",
+                    "follow_up_at",
+                    "follow_up_reminder_sent_at",
                 ]
             )
             return

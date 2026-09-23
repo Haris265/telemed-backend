@@ -155,10 +155,11 @@ class WhatsAppSimulateView(APIView):
         phone = str(request.data.get("phone", "")).strip()
         text = str(request.data.get("text", "")).strip()
         profile_name = str(request.data.get("profile_name", "")).strip()
+        image_id = str(request.data.get("image_id", "")).strip()
         doctor_id = request.data.get("doctor_id")
-        if not phone or not text:
+        if not phone or (not text and not image_id):
             return Response(
-                {"detail": "phone and text are required"},
+                {"detail": "phone and text (or image_id) are required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -169,12 +170,28 @@ class WhatsAppSimulateView(APIView):
                 replies.append(body)
                 return {"to": to, "body": body}
 
-        msg = {
+            def download_media(self, media_id: str):
+                # DEBUG: accept raw base64 slip via request for OCR testing
+                import base64
+
+                b64 = str(request.data.get("image_base64", "")).strip()
+                mime = str(request.data.get("image_mime", "image/jpeg")).strip()
+                if not b64:
+                    return None
+                try:
+                    return base64.b64decode(b64), mime
+                except Exception:
+                    return None
+
+        msg: dict[str, Any] = {
             "id": f"sim-{uuid.uuid4().hex}",
             "from": phone,
-            "type": "text",
+            "type": "image" if image_id and not text else "text",
             "text": {"body": text},
         }
+        if image_id:
+            msg["type"] = "image"
+            msg["image"] = {"id": image_id, "caption": text}
         if profile_name:
             msg["profile_name"] = profile_name
 

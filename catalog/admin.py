@@ -3,6 +3,7 @@ from django.contrib import admin
 from .models import (
     Clinic,
     DoctorAvailability,
+    DoctorBankAccount,
     DoctorClinic,
     DoctorProfile,
     DoctorSubscription,
@@ -37,11 +38,41 @@ class DoctorClinicAdmin(admin.ModelAdmin):
 
 @admin.register(DoctorProfile)
 class DoctorProfileAdmin(admin.ModelAdmin):
-    list_display = ("first_name", "last_name", "clinic", "session_time", "is_active", "created_at")
+    list_display = (
+        "first_name",
+        "last_name",
+        "clinic",
+        "session_time",
+        "consultation_fee",
+        "is_active",
+        "created_at",
+    )
     list_filter = ("is_active", "specialities", "clinic")
     search_fields = ("first_name", "last_name", "user__email")
     filter_horizontal = ("specialities",)
     raw_id_fields = ("clinic",)
+
+
+@admin.register(DoctorBankAccount)
+class DoctorBankAccountAdmin(admin.ModelAdmin):
+    list_display = (
+        "doctor",
+        "bank_name",
+        "account_title",
+        "account_number",
+        "is_primary",
+        "is_active",
+        "created_at",
+    )
+    list_filter = ("is_primary", "is_active", "bank_name")
+    search_fields = (
+        "doctor__first_name",
+        "doctor__last_name",
+        "account_number",
+        "account_title",
+        "iban",
+    )
+    raw_id_fields = ("doctor",)
 
 
 @admin.register(DoctorSubscription)

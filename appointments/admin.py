@@ -51,16 +51,25 @@ class AppointmentAdmin(admin.ModelAdmin):
         "doctor",
         "scheduled_at",
         "status",
+        "payment_method",
+        "payment_status",
+        "payment_ocr_status",
         "visit_started_at",
         "visit_ended_at",
         "created_at",
     )
-    list_filter = ("status",)
+    list_filter = ("status", "payment_method", "payment_status", "payment_ocr_status")
     search_fields = (
         "patient__name",
         "patient__phone",
         "doctor__first_name",
         "doctor__last_name",
+        "payment_reference",
     )
-    readonly_fields = ("visit_started_at", "visit_ended_at")
+    readonly_fields = (
+        "visit_started_at",
+        "visit_ended_at",
+        "payment_verified_at",
+        "payment_ocr_raw",
+    )
     inlines = [VisitAttachmentInline]
