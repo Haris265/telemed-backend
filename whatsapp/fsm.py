@@ -28,13 +28,14 @@ logger = logging.getLogger(__name__)
 
 MENU_TEXT = (
     "Welcome to PatientCare.\n\n"
-    "Book a clinic token on WhatsApp — reply with:\n"
-    "1. Request OTP for Login\n"
-    "2. Book an appointment\n"
-    "3. View My Appointments"
+    "Reply with:\n"
+    "1. Book an appointment\n"
+    "2. View my appointments\n"
+    "0. Ask a question / mazeed maloomat\n\n"
+    "Reply menu anytime to go home."
 )
 
-CANCEL_CHOICES = ("0", "cancel", "menu")
+CANCEL_CHOICES = ("cancel", "menu", "9")
 BANK_CHOICES = ("1", "bank", "transfer", "bank transfer", "bank_transfer")
 CASH_CHOICES = ("2", "cash", "clinic", "cash at clinic", "cash_at_clinic")
 MARKETPLACE_STATES = {
@@ -85,6 +86,13 @@ def _message_image_id(msg: dict) -> str:
     if msg.get("type") != "image":
         return ""
     return str((msg.get("image") or {}).get("id") or "").strip()
+
+
+def _message_audio_id(msg: dict) -> str:
+    if msg.get("type") not in ("audio", "voice"):
+        return ""
+    payload = msg.get("audio") or msg.get("voice") or {}
+    return str(payload.get("id") or "").strip()
 
 
 def _generate_otp() -> str:
@@ -165,9 +173,10 @@ def _menu_text(session: WhatsAppSession) -> str:
         return (
             f"You're messaging Dr. {doctor.full_name}'s WhatsApp.\n\n"
             "Reply with:\n"
-            "1. Request OTP for Login\n"
-            "2. Book an appointment\n"
-            "3. View My Appointments"
+            "1. Book an appointment\n"
+            "2. View my appointments\n"
+            "0. Ask a question / mazeed maloomat\n\n"
+            "Reply menu anytime to go home."
         )
     return MENU_TEXT
 
@@ -213,7 +222,7 @@ def _format_clinics(clinics: list[Clinic]) -> str:
         area = ", ".join(p for p in [c.area, c.city] if p)
         suffix = f" — {area}" if area else ""
         lines.append(f"{i}. {c.name}{suffix}")
-    lines.append("\nReply 0 to cancel.")
+    lines.append("\nReply menu to cancel.")
     return "\n".join(lines)
 
 
@@ -231,7 +240,7 @@ def _format_date_options(
     ]
     for i, opt in enumerate(options, start=1):
         lines.append(f"{i}. {opt['label']} ({opt['timing']})")
-    lines.append("\nReply 0 to cancel.")
+    lines.append("\nReply menu to cancel.")
     return "\n".join(lines)
 
 
@@ -262,7 +271,7 @@ def _format_slot_options(options: list[dict]) -> str:
     lines = ["Select a time slot (Pakistan time) — reply with number:"]
     for i, opt in enumerate(options, start=1):
         lines.append(f"{i}. {opt['label']}")
-    lines.append("\nReply 0 to cancel.")
+    lines.append("\nReply menu to cancel.")
     return "\n".join(lines)
 
 
@@ -274,7 +283,7 @@ def _format_specialities(items: list[Speciality]) -> str:
     ]
     for i, s in enumerate(items, start=1):
         lines.append(f"{i}. {s.name}")
-    lines.append("\nReply 0 to cancel.")
+    lines.append("\nReply menu to cancel.")
     return "\n".join(lines)
 
 
@@ -282,7 +291,7 @@ def _format_doctors(items: list[DoctorProfile]) -> str:
     lines = ["Select a doctor — reply with number OR name:"]
     for i, d in enumerate(items, start=1):
         lines.append(f"{i}. Dr. {d.full_name} ({d.session_time} min)")
-    lines.append("\nReply 0 to cancel.")
+    lines.append("\nReply menu to cancel.")
     return "\n".join(lines)
 
 
@@ -519,7 +528,7 @@ def _prompt_confirm(
         f"Time: {slot_label} (Pakistan)\n"
         f"Session: {doctor.session_time} min\n\n"
         "Reply YES to confirm.\n"
-        "Reply 0 to cancel.",
+        "Reply menu to cancel.",
     )
 
 
@@ -564,7 +573,7 @@ def _prompt_payment_method(session: WhatsAppSession, client, phone: str) -> None
         "1. Bank transfer (send payment slip on WhatsApp)\n"
         "2. Cash at clinic\n\n"
         "Reply 1 or 2.\n"
-        "Reply 0 to cancel.",
+        "Reply menu to cancel.",
     )
 
 
@@ -596,7 +605,7 @@ def _prompt_bank_transfer(
         client.send_text(
             phone,
             "This doctor has not set a consultation fee yet.\n"
-            "Please choose Cash at clinic (reply 2) or cancel (0).",
+            "Please choose Cash at clinic (reply 2) or reply menu to cancel.",
         )
         return
     banks = _format_bank_accounts(doctor)
@@ -604,7 +613,7 @@ def _prompt_bank_transfer(
         client.send_text(
             phone,
             "This doctor has no bank account on profile yet.\n"
-            "Please choose Cash at clinic (reply 2) or cancel (0).",
+            "Please choose Cash at clinic (reply 2) or reply menu to cancel.",
         )
         return
     session.state = WhatsAppSession.State.AWAITING_PAYMENT_SLIP
@@ -616,7 +625,7 @@ def _prompt_bank_transfer(
         f"{banks}\n\n"
         "Transfer the exact amount, then send a clear photo of the payment slip here.\n"
         "Reply 2 for Cash at clinic instead.\n"
-        "Reply 0 to cancel.",
+        "Reply menu to cancel.",
     )
 
 
@@ -731,7 +740,7 @@ def _book_bank_after_ocr(
     if fee <= 0:
         client.send_text(
             phone,
-            "Consultation fee is not set. Reply 2 for Cash at clinic, or 0 to cancel.",
+            "Consultation fee is not set. Reply 2 for Cash at clinic, or menu to cancel.",
         )
         return
 
@@ -747,7 +756,7 @@ def _book_bank_after_ocr(
             phone,
             "Payment slip could not be verified.\n"
             f"{result.error or 'Please send a clearer slip photo.'}\n\n"
-            "Send the slip image again, reply 2 for Cash at clinic, or 0 to cancel.",
+            "Send the slip image again, reply 2 for Cash at clinic, or menu to cancel.",
         )
         return
 
@@ -877,8 +886,10 @@ def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = Non
 
     text = _message_text(msg)
     image_id = _message_image_id(msg)
+    audio_id = _message_audio_id(msg)
     awaiting_slip = session.state == WhatsAppSession.State.AWAITING_PAYMENT_SLIP
-    if not text and not (awaiting_slip and image_id):
+    awaiting_faq = session.state == WhatsAppSession.State.AWAITING_FAQ_QUESTION
+    if not text and not (awaiting_slip and image_id) and not (awaiting_faq and audio_id):
         return
 
     patient = PatientProfile.objects.filter(phone=phone).first()
@@ -892,7 +903,7 @@ def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = Non
             patient.save(update_fields=["name", "updated_at"])
 
     if not patient:
-        if awaiting_slip and image_id:
+        if (awaiting_slip and image_id) or (awaiting_faq and audio_id):
             client.send_text(
                 phone,
                 "Please create your PatientCare profile first (send your full name).",
@@ -1187,7 +1198,7 @@ def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = Non
             return
         client.send_text(
             phone,
-            "Reply 1 for Bank transfer, 2 for Cash at clinic, or 0 to cancel.",
+            "Reply 1 for Bank transfer, 2 for Cash at clinic, or menu to cancel.",
         )
         return
 
@@ -1223,20 +1234,59 @@ def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = Non
         client.send_text(
             phone,
             "Please send a photo of your payment slip, reply 2 for Cash at clinic, "
-            "or 0 to cancel.",
+            "or menu to cancel.",
         )
         return
 
+    if session.state == WhatsAppSession.State.AWAITING_FAQ_QUESTION:
+        if choice in CANCEL_CHOICES:
+            _reset_to_menu(session)
+            client.send_text(phone, _menu_text(session))
+            return
+        from whatsapp.faq_bot import answer_faq
+
+        bound = _bound_doctor(session)
+        if audio_id and hasattr(client, "download_media"):
+            client.send_text(phone, "Samajh raha hoon…")
+            downloaded = client.download_media(audio_id)
+            if not downloaded:
+                client.send_text(
+                    phone,
+                    "Voice note download nahi hui. Dobara bhejein, ya text mein sawal likhein.\n"
+                    "Reply menu to go home.",
+                )
+                return
+            audio_bytes, mime_type = downloaded
+            reply = answer_faq(
+                question_text=text,
+                audio_bytes=audio_bytes,
+                audio_mime=mime_type or "audio/ogg",
+                bound_doctor=bound,
+            )
+        elif text:
+            client.send_text(phone, "Samajh raha hoon…")
+            reply = answer_faq(question_text=text, bound_doctor=bound)
+        else:
+            client.send_text(
+                phone,
+                "Apna sawal text ya voice note mein bhejein.\nReply menu to go home.",
+            )
+            return
+        client.send_text(phone, reply + "\n\n" + _menu_text(session))
+        _reset_to_menu(session)
+        return
+
+    # OTP menu hidden for now; keep verify path if user already has pending OTP.
     if session.state == WhatsAppSession.State.AWAITING_OTP and choice not in (
         "1",
         "2",
-        "3",
-        "otp",
-        "login",
+        "0",
         "book",
         "appointments",
         "appointment",
         "menu",
+        "cancel",
+        "9",
     ):
         cached = cache.get(f"otp:{phone}")
         if cached and text.strip() == str(cached):
@@ -1248,11 +1298,36 @@ def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = Non
                 phone, "Login successful. You are verified.\n\n" + _menu_text(session)
             )
         else:
-            client.send_text(phone, "Invalid or expired OTP. Reply 1 to request a new OTP.")
+            client.send_text(
+                phone,
+                "Invalid or expired OTP. Reply menu for options.",
+            )
             _reset_to_menu(session)
         return
 
-    if choice in ("1", "otp", "login"):
+    if choice in ("0", "faq", "help", "question", "maloomat"):
+        session.state = WhatsAppSession.State.AWAITING_FAQ_QUESTION
+        session.save(update_fields=["state", "updated_at"])
+        client.send_text(
+            phone,
+            "Mazeed maloomat — apna sawal text ya voice note mein bhejein.\n"
+            "Maslan: doctor kis shehar mein hain, speciality kya hai, "
+            "kitne din pehle booking ho sakti hai.\n\n"
+            "Reply menu to go home.",
+        )
+        return
+
+    if choice in ("1", "book"):
+        _start_booking(session, client, phone)
+        return
+
+    if choice in ("2", "appointments", "appointment"):
+        client.send_text(phone, _format_appointments(patient))
+        _reset_to_menu(session)
+        return
+
+    # Hidden OTP keywords (not shown on menu) for internal/testing only.
+    if choice in ("otp", "login"):
         otp = _generate_otp()
         cache.set(f"otp:{phone}", otp, timeout=300)
         session.state = WhatsAppSession.State.AWAITING_OTP
@@ -1264,15 +1339,6 @@ def handle_inbound_message(msg: dict, client, doctor: DoctorProfile | None = Non
             "It expires in 5 minutes.\n"
             "Reply with the OTP to verify.",
         )
-        return
-
-    if choice in ("2", "book"):
-        _start_booking(session, client, phone)
-        return
-
-    if choice in ("3", "appointments", "appointment"):
-        client.send_text(phone, _format_appointments(patient))
-        _reset_to_menu(session)
         return
 
     _reset_to_menu(session)

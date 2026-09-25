@@ -17,6 +17,7 @@ class WhatsAppSession(models.Model):
         AWAITING_CONFIRM = "awaiting_confirm", "Awaiting Confirm"
         AWAITING_PAYMENT_METHOD = "awaiting_payment_method", "Awaiting Payment Method"
         AWAITING_PAYMENT_SLIP = "awaiting_payment_slip", "Awaiting Payment Slip"
+        AWAITING_FAQ_QUESTION = "awaiting_faq_question", "Awaiting FAQ Question"
         MENU = "menu", "Menu"
 
     phone = models.CharField(max_length=20, unique=True, db_index=True)

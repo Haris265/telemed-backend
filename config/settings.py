@@ -189,3 +189,6 @@ GEMINI_SUMMARY_MODEL = (
 GEMINI_OCR_MODEL = (
     os.getenv("GEMINI_OCR_MODEL", "").strip() or GEMINI_SUMMARY_MODEL
 )
+GEMINI_FAQ_MODEL = (
+    os.getenv("GEMINI_FAQ_MODEL", "").strip() or GEMINI_SUMMARY_MODEL
+)
