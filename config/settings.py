@@ -38,6 +38,8 @@ INSTALLED_APPS = [
     "patients",
     "appointments",
     "whatsapp",
+    "marketing",
+    "assistant",
 ]
 
 MIDDLEWARE = [
@@ -192,3 +194,54 @@ GEMINI_OCR_MODEL = (
 GEMINI_FAQ_MODEL = (
     os.getenv("GEMINI_FAQ_MODEL", "").strip() or GEMINI_SUMMARY_MODEL
 )
+
+# Clinic Assistant (LangChain receptionist)
+CHATBOT_LLM_PROVIDER = os.getenv("CHATBOT_LLM_PROVIDER", "openrouter").strip() or "openrouter"
+CHATBOT_LLM_API_KEY = os.getenv("CHATBOT_LLM_API_KEY", "").strip()
+CHATBOT_LLM_MODEL = (
+    os.getenv("CHATBOT_LLM_MODEL", "deepseek/deepseek-v4.1-flash").strip()
+    or "deepseek/deepseek-v4.1-flash"
+)
+CHATBOT_LLM_BASE_URL = (
+    os.getenv("CHATBOT_LLM_BASE_URL", "https://openrouter.ai/api/v1").strip()
+    or "https://openrouter.ai/api/v1"
+)
+CHATBOT_LLM_TEMPERATURE = float(os.getenv("CHATBOT_LLM_TEMPERATURE", "0.3"))
+CHATBOT_LLM_TIMEOUT_SECONDS = float(os.getenv("CHATBOT_LLM_TIMEOUT_SECONDS", "30"))
+CHATBOT_LLM_MAX_RETRIES = int(os.getenv("CHATBOT_LLM_MAX_RETRIES", "2"))
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+GROQ_STT_MODEL = os.getenv("GROQ_STT_MODEL", "whisper-large-v3").strip() or "whisper-large-v3"
+
+_default_assistant_redis = REDIS_URL.rsplit("/", 1)[0] + "/1" if REDIS_URL else "redis://127.0.0.1:6379/1"
+ASSISTANT_REDIS_URL = os.getenv("ASSISTANT_REDIS_URL", _default_assistant_redis).strip() or _default_assistant_redis
+ASSISTANT_SESSION_TTL_SECONDS = int(os.getenv("ASSISTANT_SESSION_TTL_SECONDS", "604800"))
+ASSISTANT_MAX_SESSION_MESSAGES = int(os.getenv("ASSISTANT_MAX_SESSION_MESSAGES", "15"))
+ASSISTANT_KEEP_AFTER_COMPACT = int(os.getenv("ASSISTANT_KEEP_AFTER_COMPACT", "6"))
+ASSISTANT_SUMMARY_MAX_CHARS = int(os.getenv("ASSISTANT_SUMMARY_MAX_CHARS", "1500"))
+ASSISTANT_MAX_TOOL_ROUNDS = int(os.getenv("ASSISTANT_MAX_TOOL_ROUNDS", "6"))
+ASSISTANT_TURN_TIME_BUDGET_SECONDS = float(
+    os.getenv("ASSISTANT_TURN_TIME_BUDGET_SECONDS", "45")
+)
+ASSISTANT_TOOL_RESULT_MAX_CHARS = int(os.getenv("ASSISTANT_TOOL_RESULT_MAX_CHARS", "4000"))
+ASSISTANT_REPLY_MAX_CHARS = int(os.getenv("ASSISTANT_REPLY_MAX_CHARS", "1800"))
+ASSISTANT_MAX_DOCTORS_PER_OVERVIEW = int(os.getenv("ASSISTANT_MAX_DOCTORS_PER_OVERVIEW", "5"))
+ASSISTANT_OVERVIEW_DATES = int(os.getenv("ASSISTANT_OVERVIEW_DATES", "2"))
+ASSISTANT_OVERVIEW_SLOTS_PER_DATE = int(os.getenv("ASSISTANT_OVERVIEW_SLOTS_PER_DATE", "3"))
+ASSISTANT_RATE_LIMIT_PER_MINUTE = int(os.getenv("ASSISTANT_RATE_LIMIT_PER_MINUTE", "8"))
+ASSISTANT_TRACE_ENABLED = os.getenv("ASSISTANT_TRACE_ENABLED", "0").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+ASSISTANT_PLAYGROUND_ENABLED = os.getenv("ASSISTANT_PLAYGROUND_ENABLED", "0").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+ASSISTANT_CANCEL_MIN_LEAD_MINUTES = int(os.getenv("ASSISTANT_CANCEL_MIN_LEAD_MINUTES", "60"))
+ASSISTANT_MESSAGE_CONTENT_MAX_CHARS = int(
+    os.getenv("ASSISTANT_MESSAGE_CONTENT_MAX_CHARS", "2000")
+)
+ASSISTANT_USER_INPUT_MAX_CHARS = int(os.getenv("ASSISTANT_USER_INPUT_MAX_CHARS", "1000"))
+ASSISTANT_MAX_SESSION_TURNS = int(os.getenv("ASSISTANT_MAX_SESSION_TURNS", "300"))

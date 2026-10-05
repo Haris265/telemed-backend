@@ -96,6 +96,18 @@ class DoctorProfile(models.Model):
             end_date__gte=today,
         ).exists()
 
+    def has_active_marketing(self) -> bool:
+        today = timezone.localdate()
+        return self.marketing_subscriptions.filter(
+            is_active=True,
+            start_date__lte=today,
+            end_date__gte=today,
+        ).exists()
+
+    @property
+    def marketing_enabled(self) -> bool:
+        return self.has_active_marketing()
+
     @property
     def subscription_status(self) -> str:
         today = timezone.localdate()

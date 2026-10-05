@@ -180,6 +180,7 @@ class DoctorProfileSerializer(serializers.ModelSerializer):
     )
     full_name = serializers.CharField(read_only=True)
     has_active_subscription = serializers.SerializerMethodField()
+    marketing_enabled = serializers.SerializerMethodField()
     subscription_status = serializers.CharField(read_only=True)
     bank_accounts = DoctorBankAccountSerializer(many=True, read_only=True)
 
@@ -201,6 +202,7 @@ class DoctorProfileSerializer(serializers.ModelSerializer):
             "bank_accounts",
             "is_active",
             "has_active_subscription",
+            "marketing_enabled",
             "subscription_status",
             "created_at",
         )
@@ -208,6 +210,9 @@ class DoctorProfileSerializer(serializers.ModelSerializer):
 
     def get_has_active_subscription(self, obj):
         return obj.has_active_subscription()
+
+    def get_marketing_enabled(self, obj):
+        return obj.marketing_enabled
 
     def validate_speciality_ids(self, value):
         if not value:

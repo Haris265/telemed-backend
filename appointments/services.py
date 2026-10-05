@@ -145,9 +145,14 @@ def upcoming_available_dates(
         elif slot.is_active:
             by_weekday.setdefault(slot.weekday, []).append(slot)
 
+    horizon = today + timedelta(days=days_ahead)
     booked_times_by_date: dict[str, list[str]] = {}
     for appt in (
-        Appointment.objects.filter(doctor=doctor, token_date__gte=today)
+        Appointment.objects.filter(
+            doctor=doctor,
+            token_date__gte=today,
+            token_date__lte=horizon,
+        )
         .exclude(status=Appointment.Status.CANCELLED)
         .only("token_date", "scheduled_at")
     ):
@@ -195,6 +200,124 @@ def upcoming_available_dates(
         if len(options) >= limit:
             break
     return options
+
+
+def open_slot_options(
+    doctor: DoctorProfile,
+    option: dict,
+    *,
+    now: datetime | None = None,
+) -> list[dict]:
+    """Open time slots for one upcoming_available_dates option (excludes booked/past)."""
+    windows = option.get("windows") or [
+        {"start": option["start"], "end": option["end"]}
+    ]
+    booked = set(option.get("booked_times") or [])
+    current = now or pakistan_now()
+    if timezone.is_naive(current):
+        current = timezone.make_aware(current, PAKISTAN_TZ)
+    current = current.astimezone(PAKISTAN_TZ)
+    is_today = option["date"] == current.date().isoformat()
+    now_t = current.time()
+    slots: list[dict] = []
+    for slot in generate_slots_for_windows(windows, doctor.session_time):
+        key = slot.strftime("%H:%M:%S")
+        if key in booked:
+            continue
+        if is_today and slot <= now_t:
+            continue
+        slots.append({"time": key, "label": format_clock(slot)})
+    return slots
+
+
+class CancellationNotAllowed(Exception):
+    """Patient-facing cancellation refused; ``code`` is a stable machine value."""
+
+    def __init__(self, code: str, message: str):
+        self.code = code
+        self.message = message
+        super().__init__(message)
+
+
+def cancel_appointment_by_patient(
+    appointment_id: int,
+    patient: PatientProfile,
+    clinic: Clinic,
+    *,
+    min_lead: timedelta = timedelta(minutes=60),
+    now: datetime | None = None,
+) -> Appointment:
+    """
+    Cancel an upcoming appointment belonging to this patient at this clinic.
+
+    Raises CancellationNotAllowed with a stable code when the cancel is refused.
+    """
+    current = now or timezone.now()
+    if timezone.is_naive(current):
+        current = timezone.make_aware(current, PAKISTAN_TZ)
+
+    with transaction.atomic():
+        appt = (
+            Appointment.objects.select_for_update()
+            .filter(pk=appointment_id, patient=patient, clinic=clinic)
+            .select_related("doctor", "clinic")
+            .first()
+        )
+        if appt is None:
+            raise CancellationNotAllowed(
+                "appointment_not_found",
+                "No matching appointment was found.",
+            )
+        if appt.status != Appointment.Status.UPCOMING:
+            raise CancellationNotAllowed(
+                "not_cancellable",
+                "This appointment can no longer be cancelled.",
+            )
+        if appt.visit_started_at is not None:
+            raise CancellationNotAllowed(
+                "visit_already_started",
+                "The visit has already started, so this appointment cannot be cancelled.",
+            )
+        scheduled = appt.scheduled_at
+        if timezone.is_naive(scheduled):
+            scheduled = timezone.make_aware(scheduled, PAKISTAN_TZ)
+        if scheduled - current < min_lead:
+            raise CancellationNotAllowed(
+                "cancel_window_closed",
+                "Cancellations close before the appointment time.",
+            )
+
+        stamp = pakistan_localtime(current).isoformat(timespec="seconds")
+        line = f"Cancelled by patient via assistant at {stamp}"
+        appt.status = Appointment.Status.CANCELLED
+        appt.notes = (f"{appt.notes}\n{line}" if appt.notes else line).strip()
+        appt.save(update_fields=["status", "notes", "updated_at"])
+        return appt
+
+
+def can_cancel_appointment(
+    appointment: Appointment,
+    *,
+    min_lead: timedelta = timedelta(minutes=60),
+    now: datetime | None = None,
+) -> tuple[bool, datetime | None]:
+    """
+    Return (allowed, cancel_until) for an appointment without mutating it.
+
+    ``cancel_until`` is scheduled_at - min_lead when status is upcoming.
+    """
+    current = now or timezone.now()
+    if timezone.is_naive(current):
+        current = timezone.make_aware(current, PAKISTAN_TZ)
+    if appointment.status != Appointment.Status.UPCOMING:
+        return False, None
+    if appointment.visit_started_at is not None:
+        return False, None
+    scheduled = appointment.scheduled_at
+    if timezone.is_naive(scheduled):
+        scheduled = timezone.make_aware(scheduled, PAKISTAN_TZ)
+    cancel_until = scheduled - min_lead
+    return (scheduled - current) >= min_lead, cancel_until
 
 
 def book_token(

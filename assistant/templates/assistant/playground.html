@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Clinic Assistant Playground</title>
+  <style>
+    :root {
+      --bg: #f3f6f4;
+      --ink: #1a2420;
+      --muted: #5c6b64;
+      --accent: #0f6b4c;
+      --card: #ffffff;
+      --line: #d5ddd8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      background: linear-gradient(160deg, #e8f2ec, var(--bg) 40%, #eef1f6);
+      color: var(--ink);
+      min-height: 100vh;
+    }
+    main {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 24px 16px 48px;
+    }
+    h1 { margin: 0 0 8px; font-size: 1.5rem; }
+    .sub { color: var(--muted); margin-bottom: 20px; }
+    .controls, .quota, .chat, .trace {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+    .row { display: flex; flex-wrap: wrap; gap: 12px; }
+    label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); flex: 1; min-width: 140px; }
+    input, select, textarea, button {
+      font: inherit;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      padding: 8px 10px;
+      color: var(--ink);
+      background: #fff;
+    }
+    button {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    button.secondary { background: #44554c; }
+    button:disabled { opacity: 0.6; cursor: wait; }
+    .bars { display: grid; gap: 8px; }
+    .bar {
+      height: 10px;
+      background: #e5ece8;
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .bar > span { display: block; height: 100%; background: var(--accent); }
+    #log {
+      min-height: 280px;
+      max-height: 480px;
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .bubble {
+      max-width: 85%;
+      padding: 10px 12px;
+      border-radius: 12px;
+      white-space: pre-wrap;
+      line-height: 1.4;
+    }
+    .bubble.user { align-self: flex-end; background: #dcefe5; }
+    .bubble.bot { align-self: flex-start; background: #eef1f4; }
+    .bubble.meta { align-self: center; background: transparent; color: var(--muted); font-size: 0.85rem; }
+    #composer { display: flex; gap: 8px; margin-top: 12px; }
+    #composer textarea { flex: 1; min-height: 64px; resize: vertical; }
+    #tracePre { white-space: pre-wrap; font-size: 0.8rem; color: var(--muted); max-height: 240px; overflow: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Clinic Assistant Playground</h1>
+  <p class="sub">Same engine and limits as production WhatsApp will use later.</p>
+
+  <section class="controls">
+    <div class="row">
+      <label>Clinic ID<input id="clinicId" type="number" value="{{ clinic_id }}" /></label>
+      <label>Phone<input id="phone" type="text" value="03001234567" /></label>
+      <label>Name<input id="name" type="text" value="" placeholder="optional" /></label>
+      <label>Type
+        <select id="messageType">
+          <option value="text">text</option>
+          <option value="voice">voice (typed transcript)</option>
+        </select>
+      </label>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button type="button" id="resetBtn" class="secondary">Reset session</button>
+    </div>
+  </section>
+
+  <section class="quota">
+    <strong>Quota</strong>
+    <div class="bars" id="quotaBars">
+      <div>Patient replies: <span id="qPatient">—</span><div class="bar"><span id="bPatient" style="width:0%"></span></div></div>
+      <div>Clinic text today: <span id="qText">—</span><div class="bar"><span id="bText" style="width:0%"></span></div></div>
+      <div>Clinic voice today: <span id="qVoice">—</span><div class="bar"><span id="bVoice" style="width:0%"></span></div></div>
+    </div>
+  </section>
+
+  <section class="chat">
+    <div id="log"></div>
+    <div id="composer">
+      <textarea id="message" placeholder="Type a patient message…"></textarea>
+      <button type="button" id="sendBtn">Send</button>
+    </div>
+  </section>
+
+  {% if trace_enabled %}
+  <section class="trace">
+    <strong>Trace</strong>
+    <pre id="tracePre">[]</pre>
+  </section>
+  {% endif %}
+</main>
+<script>
+  const chatUrl = "{{ chat_url }}";
+  const resetUrl = "{{ reset_url }}";
+  const traceEnabled = {{ trace_enabled|yesno:"true,false" }};
+
+  function uuid() {
+    if (crypto.randomUUID) return crypto.randomUUID();
+    return "m-" + Date.now() + "-" + Math.random().toString(16).slice(2);
+  }
+
+  function addBubble(role, text) {
+    const el = document.createElement("div");
+    el.className = "bubble " + role;
+    el.textContent = text;
+    document.getElementById("log").appendChild(el);
+    el.scrollIntoView({ behavior: "smooth", block: "end" });
+  }
+
+  function setBar(labelId, barId, used, max) {
+    document.getElementById(labelId).textContent = used + " / " + max;
+    const pct = max > 0 ? Math.min(100, Math.round((used / max) * 100)) : 0;
+    document.getElementById(barId).style.width = pct + "%";
+  }
+
+  function renderQuota(q) {
+    if (!q) return;
+    setBar("qPatient", "bPatient", q.patient_replies_used || 0, q.patient_replies_max || 0);
+    setBar("qText", "bText", q.clinic_text_used_today || 0, q.clinic_text_max || 0);
+    setBar("qVoice", "bVoice", q.clinic_voice_used_today || 0, q.clinic_voice_max || 0);
+  }
+
+  async function send() {
+    const btn = document.getElementById("sendBtn");
+    const message = document.getElementById("message").value.trim();
+    if (!message) return;
+    btn.disabled = true;
+    addBubble("user", message);
+    document.getElementById("message").value = "";
+    try {
+      const res = await fetch(chatUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          clinic_id: Number(document.getElementById("clinicId").value),
+          phone: document.getElementById("phone").value,
+          name: document.getElementById("name").value,
+          message,
+          message_type: document.getElementById("messageType").value,
+          message_id: uuid(),
+        }),
+      });
+      const data = await res.json();
+      if (data.quota) renderQuota(data.quota);
+      if (data.notice) addBubble("meta", "notice: " + data.notice);
+      if (data.reply) addBubble("bot", data.reply);
+      else if (data.detail) addBubble("meta", data.detail);
+      else if (!data.reply && data.outcome) addBubble("meta", "outcome: " + data.outcome);
+      if (traceEnabled && data.trace) {
+        document.getElementById("tracePre").textContent = JSON.stringify(data.trace, null, 2);
+      }
+    } catch (err) {
+      addBubble("meta", "Request failed: " + err);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function resetSession() {
+    await fetch(resetUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        clinic_id: Number(document.getElementById("clinicId").value),
+        phone: document.getElementById("phone").value,
+      }),
+    });
+    document.getElementById("log").innerHTML = "";
+    addBubble("meta", "Session reset (quotas unchanged).");
+  }
+
+  document.getElementById("sendBtn").addEventListener("click", send);
+  document.getElementById("resetBtn").addEventListener("click", resetSession);
+  document.getElementById("message").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      send();
+    }
+  });
+</script>
+</body>
+</html>

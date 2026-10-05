@@ -128,6 +128,53 @@ class MetaWhatsAppClient:
             logger.exception("Failed to send WhatsApp message to %s", to)
             return {"error": True, "to": to}
 
+    def send_template(
+        self,
+        to: str,
+        name: str,
+        language_code: str = "en",
+        components: list[dict[str, Any]] | None = None,
+        *,
+        body_text: str | None = None,
+    ) -> dict[str, Any]:
+        """Send a Meta-approved marketing/utility template message."""
+        if not self.token or not self.phone_number_id:
+            logger.warning(
+                "Meta WA credentials missing; skipping template %s to %s", name, to
+            )
+            return {"skipped": True, "to": to, "name": name}
+
+        comps = list(components or [])
+        if body_text and not comps:
+            # Optional body variable when template has a single {{1}} placeholder.
+            comps = [
+                {
+                    "type": "body",
+                    "parameters": [{"type": "text", "text": body_text[:1024]}],
+                }
+            ]
+
+        payload: dict[str, Any] = {
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "template",
+            "template": {
+                "name": name,
+                "language": {"code": language_code or "en"},
+            },
+        }
+        if comps:
+            payload["template"]["components"] = comps
+
+        result = self._post_message(to, payload)
+        if result.get("error"):
+            return {
+                **result,
+                "detail": result.get("detail")
+                or f"Template send failed ({result.get('status', '')})",
+            }
+        return result
+
     def upload_media(self, file_path: str, mime_type: str = "") -> str | None:
         """Upload a local file to Meta and return media id."""
         if not self.token or not self.phone_number_id:

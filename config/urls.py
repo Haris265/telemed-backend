@@ -12,6 +12,7 @@ urlpatterns = [
     path("api/doctor/", include((doctor_urlpatterns, "doctor"))),
     path("api/patient/", include("patients.urls")),
     path("api/whatsapp/", include("whatsapp.urls")),
+    path("api/assistant/", include("assistant.urls")),
 ]
 
 if settings.DEBUG:
