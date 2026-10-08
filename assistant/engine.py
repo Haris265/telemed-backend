@@ -141,11 +141,15 @@ def _run_tool_loop(model, tools, messages: list, *, deadline: float) -> AIMessag
             messages.append(
                 ToolMessage(content=str(content), tool_call_id=call_id, name=name)
             )
-    # Forced finalization without tools.
+            # Forced finalization without tools.
     final_model = model
     messages.append(
         HumanMessage(
-            content="Please answer the patient now using what you already have. Do not call tools."
+            content=(
+                "Please answer the patient now using what you already have. "
+                "Reply in the patient's language (Roman Urdu or English). "
+                "Do not call tools."
+            )
         )
     )
     response = final_model.invoke(messages)
@@ -219,7 +223,7 @@ def run_turn(inbound: InboundMessage) -> TurnResult:
             turn_no = bump_turn(session)
 
             tools = build_tools(ctx, session)
-            system = build_system_prompt(ctx, session)
+            system = build_system_prompt(ctx, session, latest_user_text=text)
             messages: list = [SystemMessage(content=system)]
             for msg in session.get("messages") or []:
                 if msg.get("r") == "user":
