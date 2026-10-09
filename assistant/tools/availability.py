@@ -54,7 +54,9 @@ def build_availability_tools(ctx: ClinicContext, session: dict):
     return [
         wrap_tool(
             "get_doctor_availability",
-            "Get next available dates or open times for a doctor at this clinic.",
+            "Return open dates or exact bookable times for one doctor at this clinic. "
+            "The times in the result are the only appointment times you may offer. "
+            "Do not present a clinic opening window as the appointment time.",
             AvailabilityArgs,
             lambda doctor_id, date=None: get_doctor_availability(doctor_id, date),
         )

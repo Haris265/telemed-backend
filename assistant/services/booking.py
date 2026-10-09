@@ -31,4 +31,5 @@ def book_cash_appointment(
         payment_status=Appointment.PaymentStatus.PENDING,
         payment_amount_expected=fee if fee > 0 else None,
         payment_ocr_status=Appointment.PaymentOcrStatus.SKIPPED,
+        enforce_single_active=True,
     )

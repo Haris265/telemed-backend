@@ -25,11 +25,13 @@ def next_available_dates(
         doctor,
         clinic=clinic,
         days_ahead=days_ahead,
-        limit=limit,
+        limit=days_ahead + 1,
     )
     out = []
     for opt in options:
         open_slots = open_slot_options(doctor, opt)
+        if not open_slots:
+            continue
         out.append(
             {
                 "date": opt["date"],
@@ -38,6 +40,8 @@ def next_available_dates(
                 "timing": opt.get("timing") or "",
             }
         )
+        if len(out) >= limit:
+            break
     return out
 
 

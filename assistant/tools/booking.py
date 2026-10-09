@@ -2,19 +2,29 @@
 
 from __future__ import annotations
 
-from datetime import date, time
+from datetime import date
 
 from pydantic import BaseModel, Field
 
-from appointments.services import pakistan_now, pakistan_today
+from appointments.models import Appointment
+from appointments.services import (
+    ActiveAppointmentExists,
+    active_upcoming_appointment,
+    pakistan_now,
+    pakistan_today,
+)
 from patients.serializers import clean_name
 
 from assistant.context import ClinicContext
 from assistant.repo import ClinicCatalogRepo
 from assistant.services import slots as slot_svc
 from assistant.services.booking import book_cash_appointment
-from assistant.services.patients import get_or_create_patient
+from assistant.services.cancellation import cancel_flags
+from assistant.services.patients import find_patient_by_phone, get_or_create_patient
 from assistant.session_store import set_patient_name, set_pending
+
+PAYMENT_CASH = "pay cash at the clinic"
+FEE_LABEL = "consultation fee"
 
 
 class NameArgs(BaseModel):
@@ -29,6 +39,26 @@ class PrepareBookingArgs(BaseModel):
 
 class EmptyArgs(BaseModel):
     pass
+
+
+def _appointment_facts(appt: Appointment) -> dict:
+    flags = cancel_flags(appt)
+    return {
+        "token_code": appt.token_code,
+        "doctor": f"Dr. {appt.doctor.full_name}",
+        "date_label": appt.token_date.strftime("%d %b %Y"),
+        "time_label": slot_svc.label_datetime(appt.scheduled_at),
+        "can_cancel": flags["can_cancel"],
+        "cancel_until": flags["cancel_until"],
+    }
+
+
+def _fee_fields(doctor) -> dict:
+    return {
+        "fee": str(doctor.consultation_fee),
+        "fee_label": FEE_LABEL,
+        "payment": PAYMENT_CASH,
+    }
 
 
 def build_booking_tools(ctx: ClinicContext, session: dict):
@@ -59,6 +89,15 @@ def build_booking_tools(ctx: ClinicContext, session: dict):
             return err("invalid_argument", "slot_time must be HH:MM:SS.")
         if day < pakistan_today():
             return err("past_slot", "That date is in the past.")
+        patient = find_patient_by_phone(ctx.phone)
+        if patient is not None:
+            active = active_upcoming_appointment(patient, ctx.clinic)
+            if active is not None:
+                return err(
+                    "active_appointment_exists",
+                    "This patient already has an active appointment.",
+                    appointment=_appointment_facts(active),
+                )
         open_times = slot_svc.open_times_for_date(doctor, ctx.clinic, day)
         open_keys = {t["time"] for t in open_times}
         key = slot.strftime("%H:%M:%S")
@@ -66,13 +105,16 @@ def build_booking_tools(ctx: ClinicContext, session: dict):
             if day == pakistan_today() and slot <= pakistan_now().time():
                 return err("past_slot", "That time has already passed today.")
             return err("slot_unavailable", "That time is not available.", hint="Pick another open slot.")
+        fee_fields = _fee_fields(doctor)
         pending = {
             "type": "booking",
             "doctor_id": doctor.id,
             "doctor_name": f"Dr. {doctor.full_name}",
             "token_date": day.isoformat(),
             "slot_time": key,
-            "fee": str(doctor.consultation_fee),
+            "fee": fee_fields["fee"],
+            "fee_label": fee_fields["fee_label"],
+            "payment": fee_fields["payment"],
             "prepared_at_turn": int(session.get("turn_no") or 0),
         }
         set_pending(session, pending)
@@ -83,8 +125,7 @@ def build_booking_tools(ctx: ClinicContext, session: dict):
                     "clinic": ctx.clinic.name,
                     "date": day.isoformat(),
                     "time": slot_svc.label_slot(slot),
-                    "fee": pending["fee"],
-                    "payment": "pay cash at clinic",
+                    **fee_fields,
                 }
             }
         )
@@ -120,6 +161,13 @@ def build_booking_tools(ctx: ClinicContext, session: dict):
                 token_date=day,
                 slot_time=slot,
             )
+        except ActiveAppointmentExists as exc:
+            set_pending(session, None)
+            return err(
+                "active_appointment_exists",
+                str(exc),
+                appointment=_appointment_facts(exc.appointment),
+            )
         except ValueError as exc:
             msg = str(exc)
             code = "duplicate_booking" if "already have Token" in msg else "slot_taken"
@@ -132,7 +180,7 @@ def build_booking_tools(ctx: ClinicContext, session: dict):
                 "clinic": ctx.clinic.name,
                 "date_label": day.strftime("%d %b %Y"),
                 "time_label": slot_svc.label_slot(slot),
-                "fee": str(doctor.consultation_fee),
+                **_fee_fields(doctor),
             }
         )
 
@@ -149,7 +197,8 @@ def build_booking_tools(ctx: ClinicContext, session: dict):
         ),
         wrap_tool(
             "prepare_booking",
-            "Validate and stage a cash booking for patient confirmation.",
+            "Stage a cash booking only after the patient has chosen one exact open time "
+            "returned by get_doctor_availability. Does not book yet.",
             PrepareBookingArgs,
             lambda doctor_id, token_date, slot_time: prepare_booking(
                 doctor_id, token_date, slot_time
@@ -157,7 +206,7 @@ def build_booking_tools(ctx: ClinicContext, session: dict):
         ),
         wrap_tool(
             "confirm_booking",
-            "Confirm the pending booking after the patient explicitly says yes.",
+            "Book the pending appointment only after the patient explicitly says yes in a later message.",
             EmptyArgs,
             lambda: confirm_booking(),
         ),

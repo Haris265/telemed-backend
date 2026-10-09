@@ -24,10 +24,17 @@ def ok(data: Any) -> str:
     return json.dumps({"ok": True, "data": data}, ensure_ascii=False, default=str)
 
 
-def err(code: str, message: str, hint: str = "") -> str:
+def err(
+    code: str,
+    message: str,
+    hint: str = "",
+    appointment: dict | None = None,
+) -> str:
     payload = {"ok": False, "error": {"code": code, "message": message}}
     if hint:
         payload["error"]["hint"] = hint
+    if appointment is not None:
+        payload["error"]["appointment"] = appointment
     return json.dumps(payload, ensure_ascii=False)
 
 

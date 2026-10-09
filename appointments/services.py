@@ -202,6 +202,39 @@ def upcoming_available_dates(
     return options
 
 
+class ActiveAppointmentExists(ValueError):
+    """Patient already holds an active appointment at this clinic."""
+
+    def __init__(self, appointment: Appointment):
+        self.appointment = appointment
+        super().__init__(
+            "This patient already has an active appointment "
+            f"({appointment.token_code})."
+        )
+
+
+def active_upcoming_appointment(
+    patient: PatientProfile,
+    clinic: Clinic,
+    *,
+    lock: bool = False,
+) -> Appointment | None:
+    """First upcoming appointment for this patient at this clinic, if any."""
+    qs = (
+        Appointment.objects.filter(
+            patient=patient,
+            clinic=clinic,
+            status=Appointment.Status.UPCOMING,
+            token_date__gte=pakistan_today(),
+        )
+        .select_related("doctor", "clinic")
+        .order_by("token_date", "scheduled_at", "id")
+    )
+    if lock:
+        qs = qs.select_for_update()
+    return qs.first()
+
+
 def open_slot_options(
     doctor: DoctorProfile,
     option: dict,
@@ -337,8 +370,18 @@ def book_token(
     payment_ocr_raw: dict | None = None,
     payment_ocr_status: str = "",
     payment_verified_at=None,
+    enforce_single_active: bool = False,
 ) -> Appointment:
     with transaction.atomic():
+        if enforce_single_active:
+            if clinic is None:
+                raise ValueError("A clinic is required to enforce one active appointment.")
+            # Lock the patient row so two concurrent bookings cannot both pass.
+            PatientProfile.objects.select_for_update().filter(pk=patient.pk).exists()
+            active = active_upcoming_appointment(patient, clinic, lock=True)
+            if active is not None:
+                raise ActiveAppointmentExists(active)
+
         existing = (
             Appointment.objects.select_for_update()
             .filter(
