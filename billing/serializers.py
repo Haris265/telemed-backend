@@ -1,11 +1,15 @@
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from rest_framework import serializers
 
 from accounts.models import ClinicAdminProfile
-from catalog.models import Clinic
+from appointments.models import Appointment
+from catalog.models import Clinic, DoctorClinic, DoctorProfile
+from catalog.serializers import DoctorProfileSerializer
 
+from .clinic_doctors import build_detail_payload, clinic_link_for
 from .models import ClinicSubscription, LedgerEntry, Package, Payment, PurchaseRequest
 from .services import (
     active_subscription_summary,
@@ -394,3 +398,116 @@ class LedgerAdjustmentSerializer(serializers.Serializer):
             created_by=self.context["request"].user,
             notes=self.validated_data.get("notes") or "",
         )
+
+
+class ClinicDoctorDetailSerializer(DoctorProfileSerializer):
+    """Profile plus clinic-scoped schedule, visits, and commission split."""
+
+    clinic_link = serializers.SerializerMethodField()
+    availability = serializers.SerializerMethodField()
+    upcoming_slots = serializers.SerializerMethodField()
+    stats = serializers.SerializerMethodField()
+    patients = serializers.SerializerMethodField()
+    appointments = serializers.SerializerMethodField()
+
+    class Meta(DoctorProfileSerializer.Meta):
+        fields = DoctorProfileSerializer.Meta.fields + (
+            "clinic_link",
+            "availability",
+            "upcoming_slots",
+            "stats",
+            "patients",
+            "appointments",
+        )
+
+    def _payload(self, obj: DoctorProfile) -> dict:
+        if not hasattr(self, "_payload_cache"):
+            self._payload_cache = {}
+        key = obj.pk
+        if key not in self._payload_cache:
+            clinic = self.context["clinic"]
+            self._payload_cache[key] = build_detail_payload(obj, clinic)
+        return self._payload_cache[key]
+
+    def get_clinic_link(self, obj):
+        return self._payload(obj)["clinic_link"]
+
+    def get_availability(self, obj):
+        return self._payload(obj)["availability"]
+
+    def get_upcoming_slots(self, obj):
+        return self._payload(obj)["upcoming_slots"]
+
+    def get_stats(self, obj):
+        return self._payload(obj)["stats"]
+
+    def get_patients(self, obj):
+        return self._payload(obj)["patients"]
+
+    def get_appointments(self, obj):
+        return self._payload(obj)["appointments"]
+
+
+class ClinicDoctorUpdateSerializer(serializers.Serializer):
+    commission_type = serializers.ChoiceField(
+        choices=DoctorClinic.CommissionType.choices, required=False
+    )
+    commission_value = serializers.DecimalField(
+        max_digits=10, decimal_places=2, required=False, min_value=Decimal("0")
+    )
+    consultation_fee = serializers.DecimalField(
+        max_digits=10, decimal_places=2, required=False, min_value=Decimal("0")
+    )
+
+    def validate(self, attrs):
+        ctype = attrs.get("commission_type")
+        cval = attrs.get("commission_value")
+        doctor: DoctorProfile = self.context["doctor"]
+        clinic: Clinic = self.context["clinic"]
+        link = clinic_link_for(doctor, clinic)
+        if link is None:
+            raise serializers.ValidationError("Doctor is not linked to this clinic.")
+        effective_type = ctype or link.commission_type
+        effective_val = cval if cval is not None else link.commission_value
+        if effective_type == DoctorClinic.CommissionType.PERCENTAGE:
+            if effective_val > Decimal("100"):
+                raise serializers.ValidationError(
+                    {"commission_value": "Percentage must be between 0 and 100."}
+                )
+        self.context["link"] = link
+        return attrs
+
+    def save(self, **kwargs):
+        doctor: DoctorProfile = self.context["doctor"]
+        clinic: Clinic = self.context["clinic"]
+        link: DoctorClinic = self.context["link"]
+        changed = False
+        if "commission_type" in self.validated_data:
+            link.commission_type = self.validated_data["commission_type"]
+            changed = True
+        if "commission_value" in self.validated_data:
+            link.commission_value = self.validated_data["commission_value"]
+            changed = True
+        if changed:
+            link.commission_updated_at = timezone.now()
+            link.save(
+                update_fields=[
+                    "commission_type",
+                    "commission_value",
+                    "commission_updated_at",
+                ]
+            )
+        if "consultation_fee" in self.validated_data:
+            fee = self.validated_data["consultation_fee"]
+            doctor.consultation_fee = fee
+            doctor.save(update_fields=["consultation_fee"])
+            # Keep upcoming unpaid bookings aligned with the new listed fee.
+            Appointment.objects.filter(
+                doctor=doctor,
+                clinic=clinic,
+                status=Appointment.Status.UPCOMING,
+            ).exclude(
+                payment_status=Appointment.PaymentStatus.PAID,
+            ).update(payment_amount_expected=fee)
+        doctor.refresh_from_db()
+        return doctor

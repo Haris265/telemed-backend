@@ -8,7 +8,10 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.permissions import IsClinicAdmin, IsSuperAdmin
-from catalog.models import Clinic
+from appointments.models import Appointment
+from appointments.serializers import AppointmentDetailSerializer, AppointmentSerializer
+from catalog.models import Clinic, DoctorProfile
+from catalog.serializers import DoctorProfileSerializer
 
 from .models import ClinicSubscription, LedgerEntry, Package, Payment, PurchaseRequest
 from .serializers import (
@@ -16,6 +19,8 @@ from .serializers import (
     ClinicAdminCreateSerializer,
     ClinicAdminProfileSerializer,
     ClinicBillingSerializer,
+    ClinicDoctorDetailSerializer,
+    ClinicDoctorUpdateSerializer,
     ClinicSubscriptionSerializer,
     DirectAssignSerializer,
     LedgerAdjustmentSerializer,
@@ -419,3 +424,123 @@ class ClinicLedgerListView(generics.ListAPIView):
                 "previous": None,
             }
         return response
+
+
+def _clinic_doctors_qs(request):
+    return (
+        DoctorProfile.objects.filter(
+            is_active=True,
+            doctor_clinics__clinic=_clinic_for(request),
+        )
+        .select_related("user", "clinic")
+        .prefetch_related("specialities", "subscriptions", "bank_accounts")
+        .distinct()
+    )
+
+
+class ClinicDoctorListView(generics.ListAPIView):
+    """Read-only roster of doctors linked to the clinic admin's clinic."""
+
+    permission_classes = [IsClinicAdmin]
+    serializer_class = DoctorProfileSerializer
+
+    def get_queryset(self):
+        qs = _clinic_doctors_qs(self.request)
+        q = self.request.query_params.get("q")
+        if q:
+            qs = qs.filter(
+                Q(first_name__icontains=q)
+                | Q(last_name__icontains=q)
+                | Q(user__email__icontains=q)
+            )
+        speciality = self.request.query_params.get("speciality")
+        if speciality:
+            qs = qs.filter(specialities__id=speciality)
+        return qs.distinct()
+
+
+class ClinicDoctorDetailView(generics.RetrieveUpdateAPIView):
+    """Clinic-scoped doctor detail with schedule, visits, and commission."""
+
+    permission_classes = [IsClinicAdmin]
+    lookup_field = "uuid"
+    lookup_url_kwarg = "uuid"
+    http_method_names = ["get", "patch", "head", "options"]
+
+    def get_queryset(self):
+        return _clinic_doctors_qs(self.request)
+
+    def get_serializer_class(self):
+        if self.request.method == "PATCH":
+            return ClinicDoctorUpdateSerializer
+        return ClinicDoctorDetailSerializer
+
+    def get_serializer_context(self):
+        ctx = super().get_serializer_context()
+        ctx["clinic"] = _clinic_for(self.request)
+        if self.request.method == "PATCH":
+            ctx["doctor"] = self.get_object()
+        return ctx
+
+    def update(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        doctor = serializer.save()
+        detail = ClinicDoctorDetailSerializer(
+            doctor,
+            context={"request": request, "clinic": _clinic_for(request)},
+        )
+        return Response(detail.data)
+
+
+def _clinic_appointments_qs(request):
+    return Appointment.objects.filter(clinic=_clinic_for(request)).select_related(
+        "patient", "doctor", "clinic"
+    )
+
+
+class ClinicAppointmentListView(generics.ListAPIView):
+    """Read-only appointments for the clinic admin's clinic."""
+
+    permission_classes = [IsClinicAdmin]
+    serializer_class = AppointmentSerializer
+
+    def get_queryset(self):
+        qs = _clinic_appointments_qs(self.request)
+        status_param = self.request.query_params.get("status")
+        doctor = self.request.query_params.get("doctor")
+        patient = self.request.query_params.get("patient")
+        q = self.request.query_params.get("q")
+        date_from = self.request.query_params.get("date_from")
+        date_to = self.request.query_params.get("date_to")
+        today = self.request.query_params.get("today")
+        if today and today.lower() in ("1", "true", "yes"):
+            qs = qs.filter(token_date=timezone.localdate())
+        if status_param:
+            qs = qs.filter(status=status_param)
+        if doctor:
+            qs = qs.filter(doctor_id=doctor)
+        if patient:
+            qs = qs.filter(patient_id=patient)
+        if date_from:
+            qs = qs.filter(token_date__gte=date_from)
+        if date_to:
+            qs = qs.filter(token_date__lte=date_to)
+        if q:
+            qs = qs.filter(
+                Q(patient__name__icontains=q)
+                | Q(patient__phone__icontains=q)
+                | Q(doctor__first_name__icontains=q)
+                | Q(doctor__last_name__icontains=q)
+            )
+        return qs.order_by("-created_at", "-id")
+
+
+class ClinicAppointmentDetailView(generics.RetrieveAPIView):
+    """Read-only appointment detail scoped to the clinic admin's clinic."""
+
+    permission_classes = [IsClinicAdmin]
+    serializer_class = AppointmentDetailSerializer
+
+    def get_queryset(self):
+        return _clinic_appointments_qs(self.request).prefetch_related("attachments")
