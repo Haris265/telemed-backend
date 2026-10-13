@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 
-from .models import User
+from .models import ClinicAdminProfile, User
 
 
 @admin.register(User)
@@ -14,3 +14,11 @@ class UserAdmin(DjangoUserAdmin):
     add_fieldsets = DjangoUserAdmin.add_fieldsets + (
         ("PatientCare", {"fields": ("role",)}),
     )
+
+
+@admin.register(ClinicAdminProfile)
+class ClinicAdminProfileAdmin(admin.ModelAdmin):
+    list_display = ("user", "clinic", "created_at")
+    list_filter = ("clinic",)
+    search_fields = ("user__username", "user__email", "clinic__name")
+    raw_id_fields = ("user", "clinic")

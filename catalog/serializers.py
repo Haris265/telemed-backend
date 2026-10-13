@@ -40,6 +40,8 @@ class SpecialitySerializer(serializers.ModelSerializer):
 
 
 class ClinicSerializer(serializers.ModelSerializer):
+    has_active_package = serializers.SerializerMethodField()
+
     class Meta:
         model = Clinic
         fields = (
@@ -49,12 +51,18 @@ class ClinicSerializer(serializers.ModelSerializer):
             "city",
             "area",
             "phone",
+            "billing_email",
+            "owner_name",
             "latitude",
             "longitude",
             "is_active",
+            "has_active_package",
             "created_at",
         )
-        read_only_fields = ("created_at",)
+        read_only_fields = ("created_at", "has_active_package")
+
+    def get_has_active_package(self, obj):
+        return obj.has_active_package()
 
     def validate_latitude(self, value):
         if value < -90 or value > 90:

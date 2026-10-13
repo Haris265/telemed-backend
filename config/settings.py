@@ -40,6 +40,7 @@ INSTALLED_APPS = [
     "whatsapp",
     "marketing",
     "assistant",
+    "billing",
 ]
 
 MIDDLEWARE = [

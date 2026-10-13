@@ -36,6 +36,8 @@ class Clinic(models.Model):
         help_text="Neighbourhood/area name used for map search (e.g. Gulshan, Clifton).",
     )
     phone = models.CharField(max_length=30, blank=True, default="")
+    billing_email = models.EmailField(blank=True, default="")
+    owner_name = models.CharField(max_length=200, blank=True, default="")
     latitude = models.DecimalField(max_digits=9, decimal_places=6)
     longitude = models.DecimalField(max_digits=9, decimal_places=6)
     is_active = models.BooleanField(default=True)
@@ -46,6 +48,15 @@ class Clinic(models.Model):
 
     def __str__(self):
         return self.name
+
+    def has_active_package(self) -> bool:
+        today = timezone.localdate()
+        return self.subscriptions.filter(
+            status="active",
+            is_active=True,
+            start_date__lte=today,
+            end_date__gte=today,
+        ).exists()
 
 
 class DoctorProfile(models.Model):
