@@ -83,6 +83,8 @@ def appointment_row(appt: Appointment, link: DoctorClinic) -> dict:
         "patient_id": appt.patient_id,
         "patient_name": appt.patient.name if appt.patient_id else "",
         "patient_phone": appt.patient.phone if appt.patient_id else "",
+        "patient_type": appt.patient_type,
+        "jamat_name": appt.jamat_name or "",
         "fee_base": str(split["fee_base"]),
         "payment_status": appt.payment_status,
         "payment_method": appt.payment_method or "",
@@ -149,6 +151,13 @@ def build_detail_payload(doctor: DoctorProfile, clinic: Clinic) -> dict:
             "commission_updated_at": (
                 link.commission_updated_at.isoformat()
                 if link.commission_updated_at
+                else None
+            ),
+            "discounted_commission_type": link.discounted_commission_type,
+            "discounted_commission_value": str(link.discounted_commission_value),
+            "discounted_commission_updated_at": (
+                link.discounted_commission_updated_at.isoformat()
+                if link.discounted_commission_updated_at
                 else None
             ),
         },

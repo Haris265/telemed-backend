@@ -149,6 +149,8 @@ class AppointmentSerializer(serializers.ModelSerializer):
             "token_code",
             "status",
             "notes",
+            "patient_type",
+            "jamat_name",
             "rejection_reason",
             "payment_method",
             "payment_status",

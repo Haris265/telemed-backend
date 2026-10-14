@@ -2,23 +2,29 @@ from datetime import datetime
 
 from django.db.models import Q
 from django.db.models.deletion import ProtectedError
+from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import generics, status
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.permissions import IsClinicAdmin, IsSuperAdmin
 from appointments.models import Appointment
 from appointments.serializers import AppointmentDetailSerializer, AppointmentSerializer
-from catalog.models import Clinic, DoctorProfile
-from catalog.serializers import DoctorProfileSerializer
+from catalog.models import Clinic, DoctorClinic, DoctorProfile, Speciality
+from catalog.serializers import DoctorProfileSerializer, SpecialitySerializer
 
+from .doctor_import import build_import_template_bytes, import_doctors_for_clinic
 from .models import ClinicSubscription, LedgerEntry, Package, Payment, PurchaseRequest
 from .serializers import (
     ApprovePurchaseSerializer,
     ClinicAdminCreateSerializer,
     ClinicAdminProfileSerializer,
+    ClinicAppointmentCreateSerializer,
+    ClinicAppointmentUpdateSerializer,
     ClinicBillingSerializer,
+    ClinicDoctorCreateSerializer,
     ClinicDoctorDetailSerializer,
     ClinicDoctorUpdateSerializer,
     ClinicSubscriptionSerializer,
@@ -429,7 +435,6 @@ class ClinicLedgerListView(generics.ListAPIView):
 def _clinic_doctors_qs(request):
     return (
         DoctorProfile.objects.filter(
-            is_active=True,
             doctor_clinics__clinic=_clinic_for(request),
         )
         .select_related("user", "clinic")
@@ -438,11 +443,28 @@ def _clinic_doctors_qs(request):
     )
 
 
-class ClinicDoctorListView(generics.ListAPIView):
-    """Read-only roster of doctors linked to the clinic admin's clinic."""
+class ClinicSpecialityListView(generics.ListAPIView):
+    permission_classes = [IsClinicAdmin]
+    serializer_class = SpecialitySerializer
+
+    def get_queryset(self):
+        return Speciality.objects.filter(is_active=True).order_by("name")
+
+
+class ClinicDoctorListView(generics.ListCreateAPIView):
+    """Clinic-scoped doctor roster: list + create."""
 
     permission_classes = [IsClinicAdmin]
-    serializer_class = DoctorProfileSerializer
+
+    def get_serializer_class(self):
+        if self.request.method == "POST":
+            return ClinicDoctorCreateSerializer
+        return DoctorProfileSerializer
+
+    def get_serializer_context(self):
+        ctx = super().get_serializer_context()
+        ctx["clinic"] = _clinic_for(self.request)
+        return ctx
 
     def get_queryset(self):
         qs = _clinic_doctors_qs(self.request)
@@ -458,14 +480,23 @@ class ClinicDoctorListView(generics.ListAPIView):
             qs = qs.filter(specialities__id=speciality)
         return qs.distinct()
 
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        doctor = serializer.save()
+        return Response(
+            DoctorProfileSerializer(doctor, context={"request": request}).data,
+            status=status.HTTP_201_CREATED,
+        )
 
-class ClinicDoctorDetailView(generics.RetrieveUpdateAPIView):
-    """Clinic-scoped doctor detail with schedule, visits, and commission."""
+
+class ClinicDoctorDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """Clinic-scoped doctor detail: retrieve, update, unlink (delete)."""
 
     permission_classes = [IsClinicAdmin]
     lookup_field = "uuid"
     lookup_url_kwarg = "uuid"
-    http_method_names = ["get", "patch", "head", "options"]
+    http_method_names = ["get", "patch", "delete", "head", "options"]
 
     def get_queryset(self):
         return _clinic_doctors_qs(self.request)
@@ -492,6 +523,50 @@ class ClinicDoctorDetailView(generics.RetrieveUpdateAPIView):
         )
         return Response(detail.data)
 
+    def destroy(self, request, *args, **kwargs):
+        doctor = self.get_object()
+        clinic = _clinic_for(request)
+        deleted, _ = DoctorClinic.objects.filter(doctor=doctor, clinic=clinic).delete()
+        if not deleted:
+            return Response(
+                {"detail": "Doctor is not linked to this clinic."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class ClinicDoctorImportTemplateView(APIView):
+    permission_classes = [IsClinicAdmin]
+
+    def get(self, request):
+        data = build_import_template_bytes()
+        response = HttpResponse(
+            data,
+            content_type=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+        )
+        response["Content-Disposition"] = (
+            'attachment; filename="clinic_doctors_import_template.xlsx"'
+        )
+        return response
+
+
+class ClinicDoctorImportView(APIView):
+    permission_classes = [IsClinicAdmin]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def post(self, request):
+        uploaded = request.FILES.get("file")
+        if not uploaded:
+            return Response(
+                {"detail": "Upload a .xlsx or .csv file as 'file'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        clinic = _clinic_for(request)
+        result = import_doctors_for_clinic(clinic, uploaded)
+        return Response(result, status=status.HTTP_200_OK)
+
 
 def _clinic_appointments_qs(request):
     return Appointment.objects.filter(clinic=_clinic_for(request)).select_related(
@@ -499,11 +574,20 @@ def _clinic_appointments_qs(request):
     )
 
 
-class ClinicAppointmentListView(generics.ListAPIView):
-    """Read-only appointments for the clinic admin's clinic."""
+class ClinicAppointmentListView(generics.ListCreateAPIView):
+    """Clinic-scoped appointments: list + create."""
 
     permission_classes = [IsClinicAdmin]
-    serializer_class = AppointmentSerializer
+
+    def get_serializer_class(self):
+        if self.request.method == "POST":
+            return ClinicAppointmentCreateSerializer
+        return AppointmentSerializer
+
+    def get_serializer_context(self):
+        ctx = super().get_serializer_context()
+        ctx["clinic"] = _clinic_for(self.request)
+        return ctx
 
     def get_queryset(self):
         qs = _clinic_appointments_qs(self.request)
@@ -535,12 +619,43 @@ class ClinicAppointmentListView(generics.ListAPIView):
             )
         return qs.order_by("-created_at", "-id")
 
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        appointment = serializer.save()
+        return Response(
+            AppointmentSerializer(appointment, context={"request": request}).data,
+            status=status.HTTP_201_CREATED,
+        )
 
-class ClinicAppointmentDetailView(generics.RetrieveAPIView):
-    """Read-only appointment detail scoped to the clinic admin's clinic."""
+
+class ClinicAppointmentDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """Clinic-scoped appointment detail: retrieve, update, delete."""
 
     permission_classes = [IsClinicAdmin]
-    serializer_class = AppointmentDetailSerializer
+    http_method_names = ["get", "patch", "delete", "head", "options"]
+
+    def get_serializer_class(self):
+        if self.request.method == "PATCH":
+            return ClinicAppointmentUpdateSerializer
+        return AppointmentDetailSerializer
+
+    def get_serializer_context(self):
+        ctx = super().get_serializer_context()
+        ctx["clinic"] = _clinic_for(self.request)
+        return ctx
 
     def get_queryset(self):
         return _clinic_appointments_qs(self.request).prefetch_related("attachments")
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop("partial", False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        appointment = serializer.save()
+        return Response(
+            AppointmentDetailSerializer(
+                appointment, context={"request": request}
+            ).data
+        )

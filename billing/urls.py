@@ -66,7 +66,18 @@ clinic_urlpatterns = [
     ),
     path("payments/", views.ClinicPaymentListView.as_view(), name="clinic-payments"),
     path("ledger/", views.ClinicLedgerListView.as_view(), name="clinic-ledger"),
+    path("specialities/", views.ClinicSpecialityListView.as_view(), name="clinic-specialities"),
     path("doctors/", views.ClinicDoctorListView.as_view(), name="clinic-doctors"),
+    path(
+        "doctors/import/template/",
+        views.ClinicDoctorImportTemplateView.as_view(),
+        name="clinic-doctors-import-template",
+    ),
+    path(
+        "doctors/import/",
+        views.ClinicDoctorImportView.as_view(),
+        name="clinic-doctors-import",
+    ),
     path(
         "doctors/<uuid:uuid>/",
         views.ClinicDoctorDetailView.as_view(),

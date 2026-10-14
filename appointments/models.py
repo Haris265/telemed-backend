@@ -29,6 +29,10 @@ class Appointment(models.Model):
         FAILED = "failed", "Failed"
         SKIPPED = "skipped", "Skipped"
 
+    class PatientType(models.TextChoices):
+        NORMAL = "normal", "Normal"
+        DISCOUNTED = "discounted", "Discounted"
+
     patient = models.ForeignKey(
         PatientProfile,
         on_delete=models.CASCADE,
@@ -55,6 +59,13 @@ class Appointment(models.Model):
         default=Status.UPCOMING,
     )
     notes = models.TextField(blank=True, default="")
+    patient_type = models.CharField(
+        max_length=20,
+        choices=PatientType.choices,
+        default=PatientType.NORMAL,
+        db_index=True,
+    )
+    jamat_name = models.CharField(max_length=200, blank=True, default="")
     rejection_reason = models.TextField(blank=True, default="")
     payment_method = models.CharField(
         max_length=20,

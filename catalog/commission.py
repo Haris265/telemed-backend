@@ -67,4 +67,10 @@ def split_for_link(
     doctor: DoctorProfile | None = None,
 ) -> dict[str, Any]:
     base = resolve_fee_base(appointment, doctor or link.doctor)
+    if getattr(appointment, "patient_type", None) == Appointment.PatientType.DISCOUNTED:
+        return split_commission(
+            base,
+            link.discounted_commission_type,
+            link.discounted_commission_value,
+        )
     return split_commission(base, link.commission_type, link.commission_value)
