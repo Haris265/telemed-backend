@@ -16,8 +16,10 @@ from catalog.models import Clinic, DoctorClinic, DoctorProfile, Speciality
 from catalog.serializers import DoctorProfileSerializer, SpecialitySerializer
 
 from .doctor_import import build_import_template_bytes, import_doctors_for_clinic
-from .models import ClinicSubscription, LedgerEntry, Package, Payment, PurchaseRequest
+from .models import ClinicSubscription, Invoice, LedgerEntry, Package, Payment, PurchaseRequest
+from .permissions import HasActiveClinicPackage
 from .serializers import (
+    AcceptOfferSerializer,
     ApprovePurchaseSerializer,
     ClinicAdminCreateSerializer,
     ClinicAdminProfileSerializer,
@@ -29,17 +31,22 @@ from .serializers import (
     ClinicDoctorUpdateSerializer,
     ClinicSubscriptionSerializer,
     DirectAssignSerializer,
+    InvoiceSerializer,
     LedgerAdjustmentSerializer,
     LedgerEntrySerializer,
+    MarkInvoicePaidSerializer,
     PackageSerializer,
     PaymentSerializer,
     PurchaseRequestCreateSerializer,
     PurchaseRequestSerializer,
+    RejectOfferSerializer,
     RejectPurchaseSerializer,
+    SubmitInvoicePaymentSerializer,
 )
 from .services import (
     active_subscription_summary,
     cash_collected_since,
+    clinic_access_state,
     clinic_ledger_balance,
     clinic_payment_summary,
 )
@@ -86,10 +93,13 @@ class SuperadminDashboardView(APIView):
 class PackageListCreateView(generics.ListCreateAPIView):
     permission_classes = [IsSuperAdmin]
     serializer_class = PackageSerializer
-    queryset = Package.objects.all()
+    queryset = Package.objects.select_related("clinic").all()
 
     def get_queryset(self):
         qs = super().get_queryset()
+        clinic_id = self.request.query_params.get("clinic")
+        if clinic_id:
+            qs = qs.filter(clinic_id=clinic_id)
         q = self.request.query_params.get("q")
         if q:
             qs = qs.filter(Q(name__icontains=q) | Q(code__icontains=q))
@@ -197,7 +207,7 @@ class PurchaseRequestApproveView(APIView):
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(
             {
-                "payment": PaymentSerializer(result["payment"]).data,
+                "invoice": InvoiceSerializer(result["invoice"]).data,
                 "subscription": ClinicSubscriptionSerializer(result["subscription"]).data,
             }
         )
@@ -231,13 +241,63 @@ class DirectAssignView(APIView):
             data=request.data, context={"request": request}
         )
         serializer.is_valid(raise_exception=True)
-        result = serializer.save()
+        try:
+            result = serializer.save()
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(
             {
-                "payment": PaymentSerializer(result["payment"]).data,
                 "subscription": ClinicSubscriptionSerializer(result["subscription"]).data,
             },
             status=status.HTTP_201_CREATED,
+        )
+
+
+class SuperadminInvoiceListView(generics.ListAPIView):
+    permission_classes = [IsSuperAdmin]
+    serializer_class = InvoiceSerializer
+
+    def get_queryset(self):
+        qs = Invoice.objects.select_related("clinic", "package", "subscription")
+        clinic_id = self.request.query_params.get("clinic")
+        if clinic_id:
+            qs = qs.filter(clinic_id=clinic_id)
+        status_filter = self.request.query_params.get("status")
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+        q = self.request.query_params.get("q")
+        if q:
+            qs = qs.filter(
+                Q(clinic__name__icontains=q) | Q(package__name__icontains=q)
+            )
+        return qs
+
+
+class SuperadminInvoiceMarkPaidView(APIView):
+    permission_classes = [IsSuperAdmin]
+
+    def post(self, request, uuid):
+        try:
+            invoice = Invoice.objects.select_related(
+                "clinic", "package", "subscription", "purchase_request"
+            ).get(uuid=uuid)
+        except Invoice.DoesNotExist:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        serializer = MarkInvoicePaidSerializer(
+            data=request.data,
+            context={"request": request, "invoice": invoice},
+        )
+        serializer.is_valid(raise_exception=True)
+        try:
+            result = serializer.save()
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            {
+                "invoice": InvoiceSerializer(result["invoice"]).data,
+                "payment": PaymentSerializer(result["payment"]).data,
+                "subscription": ClinicSubscriptionSerializer(result["subscription"]).data,
+            }
         )
 
 
@@ -341,6 +401,8 @@ class ClinicMeView(APIView):
         clinic = _clinic_for(request)
         data = ClinicBillingSerializer(clinic).data
         data["ledger_balance"] = str(clinic_ledger_balance(clinic))
+        access = clinic_access_state(clinic)
+        data.update(access)
         return Response(data)
 
 
@@ -349,7 +411,108 @@ class ClinicPackageListView(generics.ListAPIView):
     serializer_class = PackageSerializer
 
     def get_queryset(self):
-        return Package.objects.filter(is_active=True)
+        return Package.objects.filter(
+            is_active=True, clinic=_clinic_for(self.request)
+        ).select_related("clinic")
+
+
+class ClinicOfferListView(generics.ListAPIView):
+    permission_classes = [IsClinicAdmin]
+    serializer_class = ClinicSubscriptionSerializer
+
+    def get_queryset(self):
+        clinic = _clinic_for(self.request)
+        status_filter = self.request.query_params.get("status") or (
+            ClinicSubscription.Status.PENDING_CLINIC
+        )
+        return ClinicSubscription.objects.filter(
+            clinic=clinic, status=status_filter, is_active=True
+        ).select_related("clinic", "package")
+
+
+class ClinicOfferAcceptView(APIView):
+    permission_classes = [IsClinicAdmin]
+
+    def post(self, request, uuid):
+        try:
+            subscription = ClinicSubscription.objects.select_related(
+                "clinic", "package"
+            ).get(uuid=uuid, clinic=_clinic_for(request))
+        except ClinicSubscription.DoesNotExist:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        serializer = AcceptOfferSerializer(
+            data=request.data or {},
+            context={"request": request, "subscription": subscription},
+        )
+        serializer.is_valid(raise_exception=True)
+        try:
+            result = serializer.save()
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            {
+                "subscription": ClinicSubscriptionSerializer(result["subscription"]).data,
+                "invoice": InvoiceSerializer(result["invoice"]).data,
+            }
+        )
+
+
+class ClinicOfferRejectView(APIView):
+    permission_classes = [IsClinicAdmin]
+
+    def post(self, request, uuid):
+        try:
+            subscription = ClinicSubscription.objects.get(
+                uuid=uuid, clinic=_clinic_for(request)
+            )
+        except ClinicSubscription.DoesNotExist:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        serializer = RejectOfferSerializer(
+            data=request.data or {},
+            context={"request": request, "subscription": subscription},
+        )
+        serializer.is_valid(raise_exception=True)
+        try:
+            updated = serializer.save()
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(ClinicSubscriptionSerializer(updated).data)
+
+
+class ClinicInvoiceListView(generics.ListAPIView):
+    permission_classes = [IsClinicAdmin]
+    serializer_class = InvoiceSerializer
+
+    def get_queryset(self):
+        qs = Invoice.objects.filter(clinic=_clinic_for(self.request)).select_related(
+            "clinic", "package", "subscription"
+        )
+        status_filter = self.request.query_params.get("status")
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+        return qs
+
+
+class ClinicInvoiceSubmitPaymentView(APIView):
+    permission_classes = [IsClinicAdmin]
+
+    def post(self, request, uuid):
+        try:
+            invoice = Invoice.objects.select_related("clinic", "package").get(
+                uuid=uuid, clinic=_clinic_for(request)
+            )
+        except Invoice.DoesNotExist:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        serializer = SubmitInvoicePaymentSerializer(
+            data=request.data,
+            context={"request": request, "invoice": invoice},
+        )
+        serializer.is_valid(raise_exception=True)
+        try:
+            updated = serializer.save()
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(InvoiceSerializer(updated).data)
 
 
 class ClinicPurchaseRequestListCreateView(generics.ListCreateAPIView):
@@ -454,7 +617,7 @@ class ClinicSpecialityListView(generics.ListAPIView):
 class ClinicDoctorListView(generics.ListCreateAPIView):
     """Clinic-scoped doctor roster: list + create."""
 
-    permission_classes = [IsClinicAdmin]
+    permission_classes = [IsClinicAdmin, HasActiveClinicPackage]
 
     def get_serializer_class(self):
         if self.request.method == "POST":
@@ -493,7 +656,7 @@ class ClinicDoctorListView(generics.ListCreateAPIView):
 class ClinicDoctorDetailView(generics.RetrieveUpdateDestroyAPIView):
     """Clinic-scoped doctor detail: retrieve, update, unlink (delete)."""
 
-    permission_classes = [IsClinicAdmin]
+    permission_classes = [IsClinicAdmin, HasActiveClinicPackage]
     lookup_field = "uuid"
     lookup_url_kwarg = "uuid"
     http_method_names = ["get", "patch", "delete", "head", "options"]
@@ -536,7 +699,7 @@ class ClinicDoctorDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 
 class ClinicDoctorImportTemplateView(APIView):
-    permission_classes = [IsClinicAdmin]
+    permission_classes = [IsClinicAdmin, HasActiveClinicPackage]
 
     def get(self, request):
         data = build_import_template_bytes()
@@ -553,7 +716,7 @@ class ClinicDoctorImportTemplateView(APIView):
 
 
 class ClinicDoctorImportView(APIView):
-    permission_classes = [IsClinicAdmin]
+    permission_classes = [IsClinicAdmin, HasActiveClinicPackage]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def post(self, request):
@@ -577,7 +740,7 @@ def _clinic_appointments_qs(request):
 class ClinicAppointmentListView(generics.ListCreateAPIView):
     """Clinic-scoped appointments: list + create."""
 
-    permission_classes = [IsClinicAdmin]
+    permission_classes = [IsClinicAdmin, HasActiveClinicPackage]
 
     def get_serializer_class(self):
         if self.request.method == "POST":
@@ -632,7 +795,7 @@ class ClinicAppointmentListView(generics.ListCreateAPIView):
 class ClinicAppointmentDetailView(generics.RetrieveUpdateDestroyAPIView):
     """Clinic-scoped appointment detail: retrieve, update, delete."""
 
-    permission_classes = [IsClinicAdmin]
+    permission_classes = [IsClinicAdmin, HasActiveClinicPackage]
     http_method_names = ["get", "patch", "delete", "head", "options"]
 
     def get_serializer_class(self):

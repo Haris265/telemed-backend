@@ -3,12 +3,32 @@ from decimal import Decimal
 from django.core.management.base import BaseCommand
 
 from billing.models import Package
+from catalog.models import Clinic
 
 
 class Command(BaseCommand):
-    help = "Seed sample clinic packages if missing"
+    help = "Seed sample clinic packages for the first clinic (or --clinic-id)"
+
+    def add_arguments(self, parser):
+        parser.add_argument(
+            "--clinic-id",
+            type=int,
+            default=None,
+            help="Clinic ID to attach packages to (default: first clinic)",
+        )
 
     def handle(self, *args, **options):
+        clinic_id = options.get("clinic_id")
+        if clinic_id:
+            clinic = Clinic.objects.filter(pk=clinic_id).first()
+        else:
+            clinic = Clinic.objects.order_by("id").first()
+        if not clinic:
+            self.stderr.write(
+                self.style.ERROR("No clinic found. Create a clinic before seeding packages.")
+            )
+            return
+
         samples = [
             {
                 "name": "Starter",
@@ -43,10 +63,15 @@ class Command(BaseCommand):
         ]
         for sample in samples:
             obj, created = Package.objects.get_or_create(
+                clinic=clinic,
                 code=sample["code"],
                 defaults=sample,
             )
             if created:
-                self.stdout.write(self.style.SUCCESS(f"Created package: {obj.code}"))
+                self.stdout.write(
+                    self.style.SUCCESS(f"Created package: {obj.code} for {clinic.name}")
+                )
             else:
-                self.stdout.write(self.style.WARNING(f"Package exists: {obj.code}"))
+                self.stdout.write(
+                    self.style.WARNING(f"Package exists: {obj.code} for {clinic.name}")
+                )

@@ -11,25 +11,37 @@ from catalog.models import Clinic, DoctorClinic, DoctorProfile, Speciality
 from catalog.serializers import DoctorProfileSerializer
 
 from .clinic_doctors import build_detail_payload, clinic_link_for
-from .models import ClinicSubscription, LedgerEntry, Package, Payment, PurchaseRequest
+from .models import ClinicSubscription, Invoice, LedgerEntry, Package, Payment, PurchaseRequest
 from .services import (
     active_subscription_summary,
     add_ledger_adjustment,
+    approve_renewal_request,
+    assign_package_offer,
+    clinic_access_state,
+    clinic_accept_offer,
     clinic_ledger_balance,
     clinic_payment_summary,
-    confirm_cash_purchase,
+    clinic_reject_offer,
+    clinic_submit_invoice_payment,
     reject_purchase_request,
+    superadmin_mark_invoice_paid,
 )
 
 User = get_user_model()
 
 
 class PackageSerializer(serializers.ModelSerializer):
+    clinic_id = serializers.IntegerField(write_only=True, required=False)
+    clinic_name = serializers.SerializerMethodField()
+
     class Meta:
         model = Package
         fields = (
             "id",
             "uuid",
+            "clinic",
+            "clinic_id",
+            "clinic_name",
             "name",
             "code",
             "description",
@@ -42,7 +54,36 @@ class PackageSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("uuid", "created_at", "updated_at")
+        read_only_fields = ("uuid", "clinic", "created_at", "updated_at")
+
+    def validate(self, attrs):
+        clinic_id = attrs.pop("clinic_id", None)
+        if self.instance is None:
+            if clinic_id is None:
+                raise serializers.ValidationError({"clinic_id": "Clinic is required."})
+            try:
+                clinic = Clinic.objects.get(pk=clinic_id)
+            except Clinic.DoesNotExist:
+                raise serializers.ValidationError({"clinic_id": "Clinic not found."})
+            attrs["clinic"] = clinic
+        elif clinic_id is not None:
+            try:
+                attrs["clinic"] = Clinic.objects.get(pk=clinic_id)
+            except Clinic.DoesNotExist:
+                raise serializers.ValidationError({"clinic_id": "Clinic not found."})
+        return attrs
+
+    def get_clinic_name(self, obj):
+        return obj.clinic.name if obj.clinic_id else None
+
+    def create(self, validated_data):
+        return Package.objects.create(**validated_data)
+
+    def update(self, instance, validated_data):
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        return instance
 
 
 class ClinicBillingSerializer(serializers.ModelSerializer):
@@ -51,6 +92,10 @@ class ClinicBillingSerializer(serializers.ModelSerializer):
     clinic_admin_username = serializers.SerializerMethodField()
     active_subscription = serializers.SerializerMethodField()
     payment_summary = serializers.SerializerMethodField()
+    access_locked = serializers.SerializerMethodField()
+    lock_reason = serializers.SerializerMethodField()
+    pending_offer_uuid = serializers.SerializerMethodField()
+    blocking_invoice_uuid = serializers.SerializerMethodField()
 
     class Meta:
         model = Clinic
@@ -71,6 +116,10 @@ class ClinicBillingSerializer(serializers.ModelSerializer):
             "clinic_admin_username",
             "active_subscription",
             "payment_summary",
+            "access_locked",
+            "lock_reason",
+            "pending_offer_uuid",
+            "blocking_invoice_uuid",
             "created_at",
         )
         read_only_fields = (
@@ -80,7 +129,29 @@ class ClinicBillingSerializer(serializers.ModelSerializer):
             "clinic_admin_username",
             "active_subscription",
             "payment_summary",
+            "access_locked",
+            "lock_reason",
+            "pending_offer_uuid",
+            "blocking_invoice_uuid",
         )
+
+    def _access(self, obj):
+        cache = self.context.setdefault("_access_cache", {})
+        if obj.pk not in cache:
+            cache[obj.pk] = clinic_access_state(obj)
+        return cache[obj.pk]
+
+    def get_access_locked(self, obj):
+        return self._access(obj)["access_locked"]
+
+    def get_lock_reason(self, obj):
+        return self._access(obj)["lock_reason"]
+
+    def get_pending_offer_uuid(self, obj):
+        return self._access(obj)["pending_offer_uuid"]
+
+    def get_blocking_invoice_uuid(self, obj):
+        return self._access(obj)["blocking_invoice_uuid"]
 
     def get_has_active_package(self, obj):
         return obj.has_active_package()
@@ -226,10 +297,11 @@ class PurchaseRequestCreateSerializer(serializers.Serializer):
     notes = serializers.CharField(required=False, allow_blank=True, default="")
 
     def validate_package_id(self, value):
+        clinic = self.context["clinic"]
         try:
-            package = Package.objects.get(pk=value, is_active=True)
+            package = Package.objects.get(pk=value, is_active=True, clinic=clinic)
         except Package.DoesNotExist:
-            raise serializers.ValidationError("Active package not found.")
+            raise serializers.ValidationError("Active package not found for this clinic.")
         self.context["package"] = package
         return value
 
@@ -264,18 +336,14 @@ class ApprovePurchaseSerializer(serializers.Serializer):
     def save(self, **kwargs):
         request_obj: PurchaseRequest = self.context["purchase_request"]
         amount = self.validated_data.get("amount")
-        if amount is None:
-            amount = request_obj.package.price
-        payment, subscription = confirm_cash_purchase(
-            clinic=request_obj.clinic,
-            package=request_obj.package,
-            amount=Decimal(amount),
-            recorded_by=self.context["request"].user,
+        invoice = approve_renewal_request(
             purchase_request=request_obj,
+            reviewed_by=self.context["request"].user,
             notes=self.validated_data.get("notes") or "",
             start_date=self.validated_data.get("start_date"),
+            amount=Decimal(amount) if amount is not None else None,
         )
-        return {"payment": payment, "subscription": subscription}
+        return {"invoice": invoice, "subscription": invoice.subscription}
 
 
 class RejectPurchaseSerializer(serializers.Serializer):
@@ -304,9 +372,13 @@ class DirectAssignSerializer(serializers.Serializer):
         except Clinic.DoesNotExist:
             raise serializers.ValidationError({"clinic_id": "Clinic not found."})
         try:
-            package = Package.objects.get(pk=attrs["package_id"], is_active=True)
+            package = Package.objects.get(
+                pk=attrs["package_id"], is_active=True, clinic=clinic
+            )
         except Package.DoesNotExist:
-            raise serializers.ValidationError({"package_id": "Active package not found."})
+            raise serializers.ValidationError(
+                {"package_id": "Active package not found for this clinic."}
+            )
         attrs["clinic"] = clinic
         attrs["package"] = package
         return attrs
@@ -315,16 +387,84 @@ class DirectAssignSerializer(serializers.Serializer):
         amount = self.validated_data.get("amount")
         if amount is None:
             amount = self.validated_data["package"].price
-        payment, subscription = confirm_cash_purchase(
+        subscription = assign_package_offer(
             clinic=self.validated_data["clinic"],
             package=self.validated_data["package"],
-            amount=Decimal(amount),
             recorded_by=self.context["request"].user,
-            purchase_request=None,
             notes=self.validated_data.get("notes") or "",
             start_date=self.validated_data.get("start_date"),
+            amount=Decimal(amount),
         )
-        return {"payment": payment, "subscription": subscription}
+        return {"subscription": subscription}
+
+
+class InvoiceSerializer(serializers.ModelSerializer):
+    clinic_name = serializers.CharField(source="clinic.name", read_only=True)
+    package_name = serializers.CharField(source="package.name", read_only=True)
+    subscription_uuid = serializers.UUIDField(
+        source="subscription.uuid", read_only=True, allow_null=True
+    )
+
+    class Meta:
+        model = Invoice
+        fields = (
+            "id",
+            "uuid",
+            "clinic",
+            "clinic_name",
+            "package",
+            "package_name",
+            "subscription",
+            "subscription_uuid",
+            "purchase_request",
+            "period_start",
+            "period_end",
+            "amount",
+            "due_date",
+            "status",
+            "paid_at",
+            "notes",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = fields
+
+
+class MarkInvoicePaidSerializer(serializers.Serializer):
+    notes = serializers.CharField(required=False, allow_blank=True, default="")
+
+    def save(self, **kwargs):
+        invoice: Invoice = self.context["invoice"]
+        payment, subscription = superadmin_mark_invoice_paid(
+            invoice=invoice,
+            recorded_by=self.context["request"].user,
+            notes=self.validated_data.get("notes") or "",
+        )
+        return {"payment": payment, "subscription": subscription, "invoice": invoice}
+
+
+class SubmitInvoicePaymentSerializer(serializers.Serializer):
+    notes = serializers.CharField(required=False, allow_blank=True, default="")
+
+    def save(self, **kwargs):
+        return clinic_submit_invoice_payment(
+            invoice=self.context["invoice"],
+            notes=self.validated_data.get("notes") or "",
+        )
+
+
+class AcceptOfferSerializer(serializers.Serializer):
+    def save(self, **kwargs):
+        subscription, invoice = clinic_accept_offer(
+            subscription=self.context["subscription"],
+            accepted_by=self.context["request"].user,
+        )
+        return {"subscription": subscription, "invoice": invoice}
+
+
+class RejectOfferSerializer(serializers.Serializer):
+    def save(self, **kwargs):
+        return clinic_reject_offer(subscription=self.context["subscription"])
 
 
 class PaymentSerializer(serializers.ModelSerializer):

@@ -42,6 +42,12 @@ superadmin_urlpatterns = [
         views.SubscriptionListView.as_view(),
         name="superadmin-subscriptions",
     ),
+    path("invoices/", views.SuperadminInvoiceListView.as_view(), name="superadmin-invoices"),
+    path(
+        "invoices/<uuid:uuid>/mark-paid/",
+        views.SuperadminInvoiceMarkPaidView.as_view(),
+        name="superadmin-invoice-mark-paid",
+    ),
     path("payments/", views.PaymentListView.as_view(), name="superadmin-payments"),
     path("ledger/", views.LedgerListView.as_view(), name="superadmin-ledger"),
     path(
@@ -54,6 +60,23 @@ superadmin_urlpatterns = [
 clinic_urlpatterns = [
     path("me/", views.ClinicMeView.as_view(), name="clinic-me"),
     path("packages/", views.ClinicPackageListView.as_view(), name="clinic-packages"),
+    path("offers/", views.ClinicOfferListView.as_view(), name="clinic-offers"),
+    path(
+        "subscriptions/<uuid:uuid>/accept/",
+        views.ClinicOfferAcceptView.as_view(),
+        name="clinic-offer-accept",
+    ),
+    path(
+        "subscriptions/<uuid:uuid>/reject/",
+        views.ClinicOfferRejectView.as_view(),
+        name="clinic-offer-reject",
+    ),
+    path("invoices/", views.ClinicInvoiceListView.as_view(), name="clinic-invoices"),
+    path(
+        "invoices/<uuid:uuid>/submit-payment/",
+        views.ClinicInvoiceSubmitPaymentView.as_view(),
+        name="clinic-invoice-submit-payment",
+    ),
     path(
         "purchase-requests/",
         views.ClinicPurchaseRequestListCreateView.as_view(),
