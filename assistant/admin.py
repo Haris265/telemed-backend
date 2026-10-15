@@ -94,6 +94,7 @@ class ClinicAssistantConfigAdmin(admin.ModelAdmin):
         "is_enabled",
         "wa_status",
         "phone_number_id",
+        "wa_live_ready",
         "updated_at",
     )
     list_filter = ("is_enabled", "wa_status", "plan")
@@ -114,8 +115,14 @@ class ClinicAssistantConfigAdmin(admin.ModelAdmin):
             },
         ),
         (
-            "WhatsApp (Phase 2)",
+            "WhatsApp (live Meta routing)",
             {
+                "description": (
+                    "When is_enabled and phone_number_id match the Meta webhook number, "
+                    "inbound chats use the assistant engine instead of the legacy FSM. "
+                    "Set access token for the clinic number, or use the platform "
+                    "META_WA_PHONE_NUMBER_ID + META_WA_TOKEN for shared testing."
+                ),
                 "fields": (
                     "wa_status",
                     "waba_id",
@@ -128,8 +135,12 @@ class ClinicAssistantConfigAdmin(admin.ModelAdmin):
                     "token_expires_at",
                     "wa_connected_at",
                     "wa_last_error",
-                )
+                ),
             },
         ),
         ("Timestamps", {"fields": ("created_at", "updated_at")}),
     )
+
+    @admin.display(boolean=True, description="WA live")
+    def wa_live_ready(self, obj: ClinicAssistantConfig) -> bool:
+        return obj.is_whatsapp_live_ready()

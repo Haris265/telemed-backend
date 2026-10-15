@@ -129,6 +129,20 @@ class WhatsAppWebhookView(APIView):
 
         payload = request.data if isinstance(request.data, dict) else {}
         for phone_number_id, messages in _extract_message_batches(payload):
+            # Clinic-scoped assistant engine (when ClinicAssistantConfig is enabled).
+            try:
+                from assistant.channels import whatsapp as assistant_wa
+
+                if assistant_wa.handle_meta_batch(phone_number_id, messages):
+                    continue
+            except Exception:
+                logger.exception(
+                    "Assistant WhatsApp routing failed for phone_number_id=%s; "
+                    "falling back to FSM",
+                    phone_number_id,
+                )
+
+            # Legacy FSM: marketplace or doctor-bound DoctorWhatsAppAccount.
             client, account = _resolve_client_and_doctor(phone_number_id)
             bound_doctor = account.doctor if account else None
             for msg in messages:
@@ -157,6 +171,47 @@ class WhatsAppSimulateView(APIView):
         profile_name = str(request.data.get("profile_name", "")).strip()
         image_id = str(request.data.get("image_id", "")).strip()
         doctor_id = request.data.get("doctor_id")
+        use_assistant = str(request.data.get("use_assistant", "")).lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        clinic_id = request.data.get("clinic_id")
+
+        # Optional: drive clinic assistant engine (same as live WhatsApp path).
+        if use_assistant:
+            if not phone or not text:
+                return Response(
+                    {"detail": "phone and text are required for use_assistant"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            try:
+                cid = int(clinic_id)
+            except (TypeError, ValueError):
+                return Response(
+                    {"detail": "clinic_id is required when use_assistant=true"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            from assistant.channels import whatsapp as assistant_wa
+
+            result = assistant_wa.handle_simulate(
+                clinic_id=cid,
+                phone=phone,
+                text=text,
+                profile_name=profile_name,
+            )
+            replies = [result.reply] if result.reply else []
+            return Response(
+                {
+                    "replies": replies,
+                    "use_assistant": True,
+                    "clinic_id": cid,
+                    "outcome": result.outcome,
+                    "session_id": result.session_id,
+                    "quota": result.quota,
+                }
+            )
+
         if not phone or (not text and not image_id):
             return Response(
                 {"detail": "phone and text (or image_id) are required"},

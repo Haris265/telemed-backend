@@ -174,3 +174,18 @@ class ClinicAssistantConfig(models.Model):
         from .crypto import decrypt_secret
 
         return decrypt_secret(self.verify_token_encrypted)
+
+    def is_whatsapp_live_ready(self) -> bool:
+        """True when Meta webhook should route this clinic to the assistant engine."""
+        from django.conf import settings
+
+        if not self.is_enabled:
+            return False
+        if not (self.phone_number_id or "").strip():
+            return False
+        if self.wa_status == self.WaStatus.CONNECTED and self.access_token_encrypted:
+            return True
+        if self.access_token_encrypted:
+            return True
+        platform_id = (getattr(settings, "META_WA_PHONE_NUMBER_ID", "") or "").strip()
+        return bool(platform_id) and self.phone_number_id.strip() == platform_id
