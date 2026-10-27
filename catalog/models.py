@@ -38,13 +38,17 @@ class Clinic(models.Model):
     phone = models.CharField(max_length=30, blank=True, default="")
     billing_email = models.EmailField(blank=True, default="")
     owner_name = models.CharField(max_length=200, blank=True, default="")
-    latitude = models.DecimalField(max_digits=9, decimal_places=6)
-    longitude = models.DecimalField(max_digits=9, decimal_places=6)
+    latitude = models.DecimalField(
+        max_digits=9, decimal_places=6, null=True, blank=True
+    )
+    longitude = models.DecimalField(
+        max_digits=9, decimal_places=6, null=True, blank=True
+    )
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ["name", "id"]
+        ordering = ["-created_at", "-id"]
 
     def __str__(self):
         return self.name

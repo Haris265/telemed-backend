@@ -96,6 +96,18 @@ class ClinicBillingSerializer(serializers.ModelSerializer):
     lock_reason = serializers.SerializerMethodField()
     pending_offer_uuid = serializers.SerializerMethodField()
     blocking_invoice_uuid = serializers.SerializerMethodField()
+    latitude = serializers.DecimalField(
+        max_digits=9,
+        decimal_places=6,
+        required=False,
+        allow_null=True,
+    )
+    longitude = serializers.DecimalField(
+        max_digits=9,
+        decimal_places=6,
+        required=False,
+        allow_null=True,
+    )
 
     class Meta:
         model = Clinic
@@ -134,6 +146,17 @@ class ClinicBillingSerializer(serializers.ModelSerializer):
             "pending_offer_uuid",
             "blocking_invoice_uuid",
         )
+
+    def to_internal_value(self, data):
+        # Empty strings from forms are not valid decimals — treat as null.
+        if hasattr(data, "copy"):
+            data = data.copy()
+        else:
+            data = dict(data)
+        for key in ("latitude", "longitude"):
+            if key in data and data[key] in ("", "null", "None"):
+                data[key] = None
+        return super().to_internal_value(data)
 
     def _access(self, obj):
         cache = self.context.setdefault("_access_cache", {})

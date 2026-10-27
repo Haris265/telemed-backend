@@ -106,7 +106,7 @@ class PackageListCreateView(generics.ListCreateAPIView):
         active = self.request.query_params.get("is_active")
         if active is not None:
             qs = qs.filter(is_active=active.lower() in ("1", "true", "yes"))
-        return qs
+        return qs.order_by("-created_at", "-id")
 
 
 class PackageDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -124,7 +124,7 @@ class PackageDetailView(generics.RetrieveUpdateDestroyAPIView):
             instance.save(update_fields=["is_active", "updated_at"])
 
 
-class SuperadminClinicListView(generics.ListAPIView):
+class SuperadminClinicListView(generics.ListCreateAPIView):
     permission_classes = [IsSuperAdmin]
     serializer_class = ClinicBillingSerializer
     queryset = Clinic.objects.all()
@@ -140,15 +140,22 @@ class SuperadminClinicListView(generics.ListAPIView):
                 | Q(owner_name__icontains=q)
             )
         active = self.request.query_params.get("is_active")
-        if active is not None:
+        if active is None:
+            qs = qs.filter(is_active=True)
+        else:
             qs = qs.filter(is_active=active.lower() in ("1", "true", "yes"))
-        return qs
+        return qs.order_by("-created_at", "-id")
 
 
-class SuperadminClinicDetailView(generics.RetrieveUpdateAPIView):
+class SuperadminClinicDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [IsSuperAdmin]
     serializer_class = ClinicBillingSerializer
     queryset = Clinic.objects.all()
+
+    def perform_destroy(self, instance):
+        # Soft-deactivate to avoid breaking FK history (doctors, appts, billing).
+        instance.is_active = False
+        instance.save(update_fields=["is_active"])
 
 
 class ClinicAdminCreateView(APIView):
@@ -411,9 +418,13 @@ class ClinicPackageListView(generics.ListAPIView):
     serializer_class = PackageSerializer
 
     def get_queryset(self):
-        return Package.objects.filter(
-            is_active=True, clinic=_clinic_for(self.request)
-        ).select_related("clinic")
+        return (
+            Package.objects.filter(
+                is_active=True, clinic=_clinic_for(self.request)
+            )
+            .select_related("clinic")
+            .order_by("-created_at", "-id")
+        )
 
 
 class ClinicOfferListView(generics.ListAPIView):
