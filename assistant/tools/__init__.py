@@ -16,6 +16,7 @@ from .appointments import build_appointment_tools
 from .availability import build_availability_tools
 from .booking import build_booking_tools
 from .discovery import build_discovery_tools
+from .parent_discovery import build_parent_discovery_tools
 
 logger = logging.getLogger(__name__)
 
@@ -81,4 +82,21 @@ def build_tools(ctx: ClinicContext, session: dict) -> list[StructuredTool]:
     tools.extend(build_availability_tools(ctx, session))
     tools.extend(build_booking_tools(ctx, session))
     tools.extend(build_appointment_tools(ctx, session))
+    return tools
+
+
+def build_parent_unbound_tools(parent_session: dict) -> list[StructuredTool]:
+    """Tools when no clinic is selected yet."""
+    return build_parent_discovery_tools(parent_session)
+
+
+def build_parent_bound_tools(
+    ctx: ClinicContext,
+    clinic_session: dict,
+    parent_session: dict,
+) -> list[StructuredTool]:
+    """Clinic tools plus parent list/switch/cross-clinic appointment tools."""
+    tools: list[StructuredTool] = []
+    tools.extend(build_tools(ctx, clinic_session))
+    tools.extend(build_parent_discovery_tools(parent_session))
     return tools

@@ -42,3 +42,5 @@ class TurnResult:
     notice: str | None = None
     outcome: str = "ok"
     status: int = 200
+    selected_clinic_id: int | None = None
+    selected_clinic_name: str = ""
