@@ -14,6 +14,7 @@ urlpatterns = [
     path("api/patient/", include("patients.urls")),
     path("api/whatsapp/", include("whatsapp.urls")),
     path("api/assistant/", include("assistant.urls")),
+    path("api/vendor/", include("assistant.vendor.urls")),
     path("api/superadmin/", include((superadmin_urlpatterns, "superadmin"))),
     path("api/clinic/", include((clinic_urlpatterns, "clinic"))),
 ]

@@ -246,3 +246,18 @@ ASSISTANT_MESSAGE_CONTENT_MAX_CHARS = int(
 )
 ASSISTANT_USER_INPUT_MAX_CHARS = int(os.getenv("ASSISTANT_USER_INPUT_MAX_CHARS", "1000"))
 ASSISTANT_MAX_SESSION_TURNS = int(os.getenv("ASSISTANT_MAX_SESSION_TURNS", "300"))
+
+# Vendor gateway — inbound HMAC (bot secrets) + outbound send API keys
+VENDOR_PARENT_BOT_SECRET = os.getenv("VENDOR_PARENT_BOT_SECRET", "").strip()
+VENDOR_CLINIC_BOT_SECRET = os.getenv("VENDOR_CLINIC_BOT_SECRET", "").strip()
+VENDOR_PARENT_BOT_SECRET_OLD = os.getenv("VENDOR_PARENT_BOT_SECRET_OLD", "").strip()
+VENDOR_CLINIC_BOT_SECRET_OLD = os.getenv("VENDOR_CLINIC_BOT_SECRET_OLD", "").strip()
+VENDOR_GATEWAY_BASE_URL = os.getenv("VENDOR_GATEWAY_BASE_URL", "").strip()
+VENDOR_PARENT_API_KEY = os.getenv("VENDOR_PARENT_API_KEY", "").strip()
+VENDOR_CLINIC_API_KEY = os.getenv("VENDOR_CLINIC_API_KEY", "").strip()
+# Stored for a later phase (status webhook not implemented yet)
+VENDOR_PARENT_WEBHOOK_SECRET = os.getenv("VENDOR_PARENT_WEBHOOK_SECRET", "").strip()
+VENDOR_CLINIC_WEBHOOK_SECRET = os.getenv("VENDOR_CLINIC_WEBHOOK_SECRET", "").strip()
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(
+    os.getenv("DATA_UPLOAD_MAX_MEMORY_SIZE", str(32 * 1024 * 1024))
+)
