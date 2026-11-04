@@ -125,8 +125,13 @@ CORS_ALLOW_CREDENTIALS = True
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
 USE_REDIS = os.getenv("USE_REDIS", "auto")
-
-if USE_REDIS == "0" or USE_REDIS.lower() == "false" or DATABASES["default"]["ENGINE"].endswith("sqlite3"):
+_use_redis = USE_REDIS.lower()
+_redis_forced_off = _use_redis in ("0", "false", "no")
+_redis_forced_on = _use_redis in ("1", "true", "yes")
+_is_sqlite = DATABASES["default"]["ENGINE"].endswith("sqlite3")
+# LocMem: explicit off, or auto+sqlite (safe local default).
+# Redis: explicit on (works with sqlite too), or auto+postgres.
+if _redis_forced_off or (not _redis_forced_on and _is_sqlite):
     CACHES = {
         "default": {
             "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
