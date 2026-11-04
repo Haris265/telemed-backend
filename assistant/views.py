@@ -1,10 +1,9 @@
-"""Playground HTML + JSON API (DEBUG + ASSISTANT_PLAYGROUND_ENABLED only)."""
+"""Playground HTML + JSON API (ASSISTANT_PLAYGROUND_ENABLED flag)."""
 
 from __future__ import annotations
 
 import uuid
 
-from django.conf import settings
 from django.http import JsonResponse
 from django.shortcuts import render
 from django.urls import reverse
@@ -22,7 +21,8 @@ from assistant.redis_client import AssistantRedisUnavailable
 
 
 def _playground_allowed() -> bool:
-    return bool(settings.DEBUG) and sa.playground_enabled()
+    # Flag-only so production can keep DEBUG=False and still use playground.
+    return sa.playground_enabled()
 
 
 class PlaygroundGateMixin:

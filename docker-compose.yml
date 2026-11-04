@@ -20,7 +20,7 @@ services:
       USE_REDIS: "0"
       ASSISTANT_REDIS_URL: redis://redis:6379/1
     volumes:
-      - telemed_sqlite_data:/app/data
+      - ./data:/app/data
       - telemed_media_data:/app/media
       - telemed_static_data:/app/staticfiles
     expose:
@@ -38,7 +38,7 @@ services:
       USE_REDIS: "0"
       TZ: Asia/Karachi
     volumes:
-      - telemed_sqlite_data:/app/data
+      - ./data:/app/data
       - telemed_media_data:/app/media
       - telemed_static_data:/app/staticfiles
       - ./docker/reminder-loop.sh:/app/docker/reminder-loop.sh:ro
@@ -59,7 +59,6 @@ services:
       - backend
 
 volumes:
-  telemed_sqlite_data:
   telemed_media_data:
   telemed_static_data:
   telemed_redis_data:

@@ -1,6 +1,4 @@
-import random
 import re
-import string
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
@@ -29,7 +27,8 @@ def clean_name(value: str) -> str:
 
 
 def generate_otp() -> str:
-    return "".join(random.choices(string.digits, k=6))
+    # Temporary fixed OTP for all accounts (testing / staging).
+    return "123456"
 
 
 def issue_tokens_for_user(user: User) -> dict:

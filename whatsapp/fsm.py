@@ -1,7 +1,5 @@
 import logging
-import random
 import re
-import string
 from datetime import date, time
 from decimal import Decimal
 
@@ -96,7 +94,8 @@ def _message_audio_id(msg: dict) -> str:
 
 
 def _generate_otp() -> str:
-    return "".join(random.choices(string.digits, k=6))
+    # Temporary fixed OTP for all accounts (testing / staging).
+    return "123456"
 
 
 def _norm_name(value: str) -> str:
